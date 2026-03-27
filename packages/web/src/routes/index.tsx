@@ -1,20 +1,30 @@
 import * as React from "react";
+import type { LucideIcon } from "lucide-react";
+import {
+  ArrowRight,
+  Globe2,
+  Languages,
+  LoaderCircle,
+  MicVocal,
+  Sparkles,
+  Upload,
+  Waves,
+} from "lucide-react";
 import { createFileRoute } from "@tanstack/react-router";
-import { BadgeInfo, FileAudio2, Languages, SlidersHorizontal, Waves } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { getWorkerBaseUrl } from "@/lib/runtime-config";
 
 export const Route = createFileRoute("/")({
   component: Home,
 });
+
+/* ------------------------------------------------------------------ */
+/*  Types                                                              */
+/* ------------------------------------------------------------------ */
+
+type DemoMode = "vad" | "stt" | "localize";
 
 type ReadyResponse = {
   status: string;
@@ -27,19 +37,6 @@ type ReadyResponse = {
     status: string;
     summary: string;
   };
-};
-
-type ModelsResponse = {
-  baseline_model_ids: string[];
-  models: Array<{
-    approved_for_auto_download: boolean;
-    license_name: string;
-    model_id: string;
-    notes: string;
-    serve_status: string;
-    stage: string;
-  }>;
-  profile: string;
 };
 
 type VadResponse = {
@@ -128,903 +125,711 @@ type LocalizeResponse = {
   translated_text: string;
 };
 
-const THRESHOLD_PRESETS = [0.3, 0.45, 0.5, 0.65, 0.8];
+/* ------------------------------------------------------------------ */
+/*  Constants                                                          */
+/* ------------------------------------------------------------------ */
+
+const THRESHOLD_PRESETS = [0.3, 0.5, 0.65, 0.8];
+
 const STT_LANGUAGE_OPTIONS = [
-  { value: "auto", label: "Auto detect" },
+  { value: "auto", label: "Auto" },
   { value: "ko", label: "Korean" },
   { value: "en", label: "English" },
   { value: "ja", label: "Japanese" },
   { value: "zh", label: "Chinese" },
 ];
-const TARGET_LANGUAGE_OPTIONS = STT_LANGUAGE_OPTIONS.filter((option) => option.value !== "auto");
-const WINDOW_SCORE_PREVIEW_LIMIT = 80;
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
-const MAX_DURATION_SECONDS = 15 * 60;
 
-function formatBytes(bytes: number) {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
+const TARGET_LANGUAGE_OPTIONS = STT_LANGUAGE_OPTIONS.filter((o) => o.value !== "auto");
 
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KiB`;
-  }
+const SCORE_LIMIT = 80;
+const MAX_BYTES = 25 * 1024 * 1024;
 
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+const MODES: Array<{
+  value: DemoMode;
+  label: string;
+  icon: LucideIcon;
+  action: string;
+  running: string;
+}> = [
+  { value: "vad", label: "VAD", icon: Waves, action: "Run VAD", running: "Running VAD\u2026" },
+  { value: "stt", label: "STT", icon: MicVocal, action: "Run STT", running: "Running STT\u2026" },
+  {
+    value: "localize",
+    label: "Localize",
+    icon: Sparkles,
+    action: "Run Localize",
+    running: "Running\u2026",
+  },
+];
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+function fmtBytes(b: number) {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KiB`;
+  return `${(b / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-function formatThreshold(value: number) {
-  return value.toFixed(2);
+function fmtMs(ms: number | undefined) {
+  if (!ms) return "0 ms";
+  if (ms < 1000) return `${ms} ms`;
+  const s = Math.round(ms / 100) / 10;
+  if (s < 60) return `${s.toFixed(1)} s`;
+  return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
 }
+
+function fmtProb(p: number) {
+  return `${Math.round(p * 100)}%`;
+}
+
+function langLabel(code: string) {
+  return STT_LANGUAGE_OPTIONS.find((o) => o.value === code)?.label ?? code;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Page                                                               */
+/* ------------------------------------------------------------------ */
 
 function Home() {
   const workerBaseUrl = getWorkerBaseUrl();
-  const [threshold, setThreshold] = React.useState("0.5");
-  const [language, setLanguage] = React.useState("auto");
-  const [targetLanguage, setTargetLanguage] = React.useState("en");
-  const [selectedFile, setSelectedFile] = React.useState<File | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
-  const [activeRun, setActiveRun] = React.useState<"vad" | "stt" | "localize" | null>(null);
-  const [ready, setReady] = React.useState<ReadyResponse | null>(null);
-  const [catalog, setCatalog] = React.useState<ModelsResponse | null>(null);
-  const [result, setResult] = React.useState<VadResponse | null>(null);
-  const [sttResult, setSttResult] = React.useState<SttResponse | null>(null);
-  const [localizeResult, setLocalizeResult] = React.useState<LocalizeResponse | null>(null);
 
-  const parsedThreshold = Number.parseFloat(threshold);
-  const thresholdIsValid =
-    Number.isFinite(parsedThreshold) && parsedThreshold >= 0.1 && parsedThreshold <= 0.99;
-  const isRunningVad = activeRun === "vad";
-  const isRunningStt = activeRun === "stt";
-  const isRunningLocalization = activeRun === "localize";
-  const selectedFileSummary = selectedFile
-    ? `${selectedFile.name} · ${selectedFile.type || "unknown type"} · ${formatBytes(selectedFile.size)}`
-    : "No file selected yet";
-  const windowScoresPreview = result?.window_scores.slice(0, WINDOW_SCORE_PREVIEW_LIMIT) ?? [];
-  const speechWindowCount =
-    result && thresholdIsValid
-      ? result.window_scores.filter((score) => score >= parsedThreshold).length
-      : 0;
-  const localizationAudioPreview =
-    localizeResult?.stages.tts.audio_base64 && localizeResult.stages.tts.content_type
-      ? `data:${localizeResult.stages.tts.content_type};base64,${localizeResult.stages.tts.audio_base64}`
+  const [mode, setMode] = React.useState<DemoMode>("localize");
+  const [tab, setTab] = React.useState<DemoMode>("localize");
+  const [threshold, setThreshold] = React.useState("0.50");
+  const [srcLang, setSrcLang] = React.useState("auto");
+  const [tgtLang, setTgtLang] = React.useState("en");
+  const [file, setFile] = React.useState<File | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [busy, setBusy] = React.useState<DemoMode | null>(null);
+  const [ready, setReady] = React.useState<ReadyResponse | null>(null);
+  const [vad, setVad] = React.useState<VadResponse | null>(null);
+  const [sttRes, setStt] = React.useState<SttResponse | null>(null);
+  const [loc, setLoc] = React.useState<LocalizeResponse | null>(null);
+
+  const thr = Number.parseFloat(threshold);
+  const thrOk = Number.isFinite(thr) && thr >= 0.1 && thr <= 0.99;
+  const live = Boolean(ready?.triton.server_ready && ready?.triton.model_ready);
+  const cfg = MODES.find((m) => m.value === mode) ?? MODES[0];
+
+  const audioSrc =
+    loc?.stages.tts.audio_base64 && loc.stages.tts.content_type
+      ? `data:${loc.stages.tts.content_type};base64,${loc.stages.tts.audio_base64}`
       : null;
+  const scores = vad?.window_scores.slice(0, SCORE_LIMIT) ?? [];
+  const speechWins = vad && thrOk ? vad.window_scores.filter((s) => s >= thr).length : 0;
 
   React.useEffect(() => {
-    let cancelled = false;
-
-    async function loadBootstrapData() {
+    let off = false;
+    (async () => {
       try {
-        const [readyResponse, modelsResponse] = await Promise.all([
-          fetch(`${workerBaseUrl}/api/ready`),
-          fetch(`${workerBaseUrl}/api/models`),
-        ]);
-
-        if (!modelsResponse.ok) {
-          throw new Error(`model catalog check failed: ${modelsResponse.status}`);
-        }
-
-        const [readyPayload, modelsPayload] = await Promise.all([
-          readyResponse.json().catch(() => null) as Promise<ReadyResponse | null>,
-          modelsResponse.json() as Promise<ModelsResponse>,
-        ]);
-
-        if (!cancelled) {
-          setReady(readyPayload);
-          setCatalog(modelsPayload);
-          setError(
-            readyResponse.ok
-              ? null
-              : readyPayload?.triton.summary ??
-                  `worker ready check failed: ${readyResponse.status}`,
-          );
-        }
-      } catch (loadError) {
-        if (!cancelled) {
-          setError(
-            loadError instanceof Error
-              ? loadError.message
-              : "failed to load worker bootstrap state",
-          );
-        }
+        const res = await fetch(`${workerBaseUrl}/api/ready`);
+        const body = (await res.json().catch(() => null)) as ReadyResponse | null;
+        if (off) return;
+        setReady(body);
+        if (!res.ok) setError(body?.triton.summary ?? `worker check failed: ${res.status}`);
+      } catch (err) {
+        if (!off) setError(err instanceof Error ? err.message : "failed to reach worker");
       }
-    }
-
-    void loadBootstrapData();
-
+    })();
     return () => {
-      cancelled = true;
+      off = true;
     };
   }, [workerBaseUrl]);
 
-  async function runWorkerRoute(route: "vad" | "stt" | "localize") {
-    if (!selectedFile) {
-      setError("Upload a PCM WAV file first.");
+  async function run(route: DemoMode) {
+    if (!file) {
+      setError("Upload a WAV file first.");
+      return;
+    }
+    if (!thrOk) {
+      setError("Threshold must be between 0.10 and 0.99.");
       return;
     }
 
-    if (!thresholdIsValid) {
-      setError("Threshold must stay between 0.10 and 0.99.");
-      return;
-    }
-
-    setActiveRun(route);
+    setBusy(route);
+    setTab(route);
     setError(null);
-    if (route === "vad") {
-      setResult(null);
-    } else if (route === "stt") {
-      setSttResult(null);
-    } else {
-      setLocalizeResult(null);
-    }
+    if (route === "vad") setVad(null);
+    else if (route === "stt") setStt(null);
+    else setLoc(null);
 
     try {
-      const formData = new FormData();
-      formData.append("file", selectedFile);
+      const fd = new FormData();
+      fd.append("file", file);
+      const q = new URLSearchParams({ threshold });
 
-      const query = new URLSearchParams({ threshold });
-      let response: Response;
-      if (route === "vad") {
-        response = await fetch(`${workerBaseUrl}/api/vad?${query.toString()}`, {
-          method: "POST",
-          body: formData,
-        });
-      } else if (route === "stt") {
-        if (language !== "auto") {
-          query.set("language", language);
-        }
-        response = await fetch(`${workerBaseUrl}/api/stt?${query.toString()}`, {
-          method: "POST",
-          body: formData,
-        });
-      } else {
-        query.set("target_language", targetLanguage);
-        if (language !== "auto") {
-          query.set("source_language", language);
-        }
-        response = await fetch(`${workerBaseUrl}/api/localize?${query.toString()}`, {
-          method: "POST",
-          body: formData,
-        });
+      if (route === "stt" && srcLang !== "auto") {
+        q.set("language", srcLang);
+      } else if (route === "localize") {
+        q.set("target_language", tgtLang);
+        if (srcLang !== "auto") q.set("source_language", srcLang);
       }
 
-      const payload = await response.json().catch(() => ({} as { detail?: string; message?: string }));
-      if (!response.ok) {
-        if (route === "localize") {
-          setLocalizeResult(payload as LocalizeResponse);
-        }
+      const res = await fetch(`${workerBaseUrl}/api/${route}?${q}`, {
+        method: "POST",
+        body: fd,
+      });
+      const body = await res.json().catch(() => ({}) as Record<string, unknown>);
+
+      if (!res.ok) {
+        if (route === "localize") setLoc(body as LocalizeResponse);
         throw new Error(
-          payload.detail ??
-            payload.message ??
-            `request failed with ${response.status}`,
+          (body as { detail?: string; message?: string }).detail ??
+            (body as { detail?: string; message?: string }).message ??
+            `request failed: ${res.status}`,
         );
       }
 
-      if (route === "vad") {
-        setResult(payload as VadResponse);
-      } else if (route === "stt") {
-        setSttResult(payload as SttResponse);
-      } else {
-        setLocalizeResult(payload as LocalizeResponse);
-      }
-    } catch (submitError) {
-      setError(
-        submitError instanceof Error
-          ? submitError.message
-          : route === "vad"
-            ? "failed to run VAD"
-            : route === "stt"
-              ? "failed to run STT"
-              : "failed to run localization preview",
-      );
+      if (route === "vad") setVad(body as VadResponse);
+      else if (route === "stt") setStt(body as SttResponse);
+      else setLoc(body as LocalizeResponse);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `failed to run ${route}`);
     } finally {
-      setActiveRun(null);
+      setBusy(null);
     }
   }
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await runWorkerRoute("vad");
-  }
-
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(95,164,255,0.16),transparent_42%),linear-gradient(180deg,#f8fafc_0%,#eef4ff_100%)] px-6 py-10">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
-        <section className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
-          <Card className="border-slate-200/70 bg-white/90 shadow-sm">
-            <CardHeader>
-              <div className="flex items-center gap-3 text-xs uppercase tracking-[0.24em] text-slate-500">
-                <Waves className="h-4 w-4" />
-                Baseline VAD workflow
-              </div>
-              <CardTitle className="text-3xl tracking-tight">
-                Triton Speech Baseline
-              </CardTitle>
-              <CardDescription className="max-w-2xl text-sm leading-6">
-                Upload a WAV file, tune the speech threshold, and inspect segment
-                boundaries from the approved Silero VAD path. The worker now rejects
-                malformed, oversized, and overlong uploads with clearer errors.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form className="grid gap-4" onSubmit={handleSubmit}>
-                <div className="grid gap-4 md:grid-cols-[1.2fr_0.8fr]">
-                  <label className="grid gap-2 text-sm font-medium text-slate-900">
-                    WAV upload
-                    <input
-                      accept=".wav,audio/wav"
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-                      onChange={(event) => {
-                        setSelectedFile(event.target.files?.[0] ?? null);
-                        setError(null);
-                      }}
-                      type="file"
-                    />
-                    <span className="text-xs font-normal leading-5 text-slate-500">
-                      {selectedFileSummary}. Demo guardrails: up to {formatBytes(MAX_UPLOAD_BYTES)}
-                      and {MAX_DURATION_SECONDS / 60} minutes.
-                    </span>
-                  </label>
+    <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
+      {/* ── Header ── */}
+      <header className="flex items-center justify-between">
+        <h1 className="text-base font-semibold tracking-tight text-slate-950">Triton Playground</h1>
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${live ? "bg-emerald-500" : "bg-amber-400"}`}
+          />
+          {live ? "Ready" : "Connecting"}
+        </div>
+      </header>
 
-                  <div className="grid gap-2 text-sm font-medium text-slate-900">
-                    <div className="flex items-center gap-2">
-                      <SlidersHorizontal className="h-4 w-4 text-slate-500" />
-                      Threshold
-                    </div>
-                    <input
-                      className="w-full accent-slate-900"
-                      max="0.99"
-                      min="0.10"
-                      onChange={(event) => setThreshold(event.target.value)}
-                      step="0.01"
-                      type="range"
-                      value={threshold}
-                    />
-                    <div className="grid grid-cols-[1fr_auto] items-center gap-3">
-                      <input
-                        className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-                        max="0.99"
-                        min="0.10"
-                        onChange={(event) => setThreshold(event.target.value)}
-                        step="0.01"
-                        type="number"
-                        value={threshold}
-                      />
-                      <div className="rounded-full bg-slate-100 px-3 py-2 text-sm font-medium text-slate-700">
-                        {thresholdIsValid ? formatThreshold(parsedThreshold) : "invalid"}
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {THRESHOLD_PRESETS.map((preset) => (
-                        <button
-                          className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
-                          key={preset}
-                          type="button"
-                          onClick={() => setThreshold(formatThreshold(preset))}
+      {/* ── Banner ── */}
+      <div className="mt-5 rounded-xl bg-slate-950 px-5 py-4 text-white">
+        <p className="text-sm font-semibold tracking-tight">
+          Speech &amp; Audio AI on Triton 24.05
+        </p>
+        <p className="mt-1 text-sm leading-relaxed text-slate-400">
+          Upload a WAV file, pick a mode, and run inference.
+          VAD detects speech, STT transcribes it, Localize translates and synthesizes in one pass.
+        </p>
+      </div>
+
+      {/* ── Controls ── */}
+      <form
+        className="mt-5 space-y-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void run(mode);
+        }}
+      >
+        {/* Upload */}
+        <label className="flex cursor-pointer items-center gap-3 rounded-xl border border-dashed border-slate-300 bg-white/70 px-4 py-3 backdrop-blur transition hover:border-slate-400 hover:bg-white/90">
+          <div className="rounded-lg bg-slate-100 p-2">
+            <Upload className="h-4 w-4 text-slate-500" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-medium text-slate-900">
+              {file ? file.name : "Upload WAV"}
+            </div>
+            <div className="text-xs text-slate-500">
+              {file ? fmtBytes(file.size) : `PCM WAV \u00b7 max ${fmtBytes(MAX_BYTES)}`}
+            </div>
+          </div>
+          {file && (
+            <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
+              Loaded
+            </span>
+          )}
+          <input
+            accept=".wav,audio/wav"
+            className="sr-only"
+            disabled={busy !== null}
+            onChange={(e) => {
+              setFile(e.target.files?.[0] ?? null);
+              setError(null);
+            }}
+            type="file"
+          />
+        </label>
+
+        {/* Mode + params */}
+        <div className="space-y-4 rounded-xl border border-slate-200 bg-white/70 p-4 backdrop-blur">
+          {/* Mode segmented control */}
+          <div className="flex gap-1 rounded-lg bg-slate-100 p-1">
+            {MODES.map((m) => {
+              const Icon = m.icon;
+              const active = mode === m.value;
+              const done =
+                (m.value === "vad" && vad) ||
+                (m.value === "stt" && sttRes) ||
+                (m.value === "localize" && loc);
+              return (
+                <button
+                  key={m.value}
+                  className={`flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition ${
+                    active
+                      ? "bg-white text-slate-950 shadow-sm"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                  disabled={busy !== null}
+                  onClick={() => {
+                    setMode(m.value);
+                    setError(null);
+                  }}
+                  type="button"
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                  {m.label}
+                  {done ? <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> : null}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Threshold */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-3">
+              <span className="w-16 shrink-0 text-sm font-medium text-slate-700">Threshold</span>
+              <input
+                className="flex-1 accent-slate-950"
+                disabled={busy !== null}
+                max="0.99"
+                min="0.10"
+                onChange={(e) => setThreshold(e.target.value)}
+                step="0.01"
+                type="range"
+                value={threshold}
+              />
+              <input
+                className="w-16 rounded-lg border border-slate-200 px-2 py-1.5 text-center text-sm"
+                disabled={busy !== null}
+                max="0.99"
+                min="0.10"
+                onChange={(e) => setThreshold(e.target.value)}
+                step="0.01"
+                type="number"
+                value={threshold}
+              />
+            </div>
+            <div className="flex gap-1.5 pl-[76px]">
+              {THRESHOLD_PRESETS.map((p) => (
+                <button
+                  key={p}
+                  className={`rounded-md px-2.5 py-1 text-xs transition ${
+                    threshold === p.toFixed(2)
+                      ? "bg-slate-900 text-white"
+                      : "border border-slate-200 text-slate-600 hover:bg-slate-50"
+                  }`}
+                  disabled={busy !== null}
+                  onClick={() => setThreshold(p.toFixed(2))}
+                  type="button"
+                >
+                  {p.toFixed(2)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Language selects */}
+          {mode !== "vad" && (
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex items-center gap-2">
+                <Languages className="h-3.5 w-3.5 text-slate-400" />
+                <span className="text-sm font-medium text-slate-700">Source</span>
+                <select
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm"
+                  disabled={busy !== null}
+                  onChange={(e) => setSrcLang(e.target.value)}
+                  value={srcLang}
+                >
+                  {STT_LANGUAGE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {mode === "localize" && (
+                <label className="flex items-center gap-2">
+                  <Globe2 className="h-3.5 w-3.5 text-slate-400" />
+                  <span className="text-sm font-medium text-slate-700">Target</span>
+                  <select
+                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm"
+                    disabled={busy !== null}
+                    onChange={(e) => setTgtLang(e.target.value)}
+                    value={tgtLang}
+                  >
+                    {TARGET_LANGUAGE_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Error */}
+        {error && (
+          <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {error}
+          </p>
+        )}
+
+        {/* Run */}
+        <Button
+          className="w-full"
+          disabled={!file || !thrOk || busy !== null}
+          size="lg"
+          type="submit"
+        >
+          {busy === mode ? (
+            <>
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+              {cfg.running}
+            </>
+          ) : (
+            <>
+              {cfg.action}
+              <ArrowRight className="h-4 w-4" />
+            </>
+          )}
+        </Button>
+      </form>
+
+      {/* ── Results ── */}
+      <section className="mt-8 border-t border-slate-200 pt-6">
+        <Tabs onValueChange={(v) => setTab(v as DemoMode)} value={tab}>
+          <TabsList className="mb-6 grid w-full grid-cols-3">
+            <TabsTrigger value="vad">
+              VAD
+              {vad ? (
+                <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              ) : null}
+            </TabsTrigger>
+            <TabsTrigger value="stt">
+              STT
+              {sttRes ? (
+                <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              ) : null}
+            </TabsTrigger>
+            <TabsTrigger value="localize">
+              Localize
+              {loc ? (
+                <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              ) : null}
+            </TabsTrigger>
+          </TabsList>
+
+          {/* ─ VAD ─ */}
+          <TabsContent value="vad">
+            {vad ? (
+              <div className="space-y-6">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <Metric detail={fmtMs(vad.duration_ms)} label="File" value={vad.filename} />
+                  <Metric
+                    detail={`threshold ${vad.threshold.toFixed(2)}`}
+                    label="Segments"
+                    value={String(vad.segment_count)}
+                  />
+                  <Metric
+                    detail={`${vad.sample_rate} Hz`}
+                    label="Speech windows"
+                    value={`${speechWins}/${vad.window_scores.length}`}
+                  />
+                  <Metric detail={vad.model} label="Window size" value={fmtMs(vad.window_ms)} />
+                </div>
+
+                {scores.length > 0 && (
+                  <div>
+                    <h3 className="mb-2 text-sm font-medium text-slate-900">Window scores</h3>
+                    <div
+                      className="grid h-32 items-end gap-px rounded-lg border border-slate-200 bg-slate-50 p-3"
+                      style={{
+                        gridTemplateColumns: `repeat(${scores.length}, minmax(0, 1fr))`,
+                      }}
+                    >
+                      {scores.map((s, i) => (
+                        <div
+                          className="flex h-full items-end"
+                          key={`${i}-${s}`}
+                          title={`${i + 1}: ${s.toFixed(4)}`}
                         >
-                          {formatThreshold(preset)}
-                        </button>
+                          <div
+                            className={`w-full rounded-t-sm ${s >= vad.threshold ? "bg-cyan-500" : "bg-slate-300"}`}
+                            style={{ height: `${Math.max(4, Math.min(100, s * 100))}%` }}
+                          />
+                        </div>
                       ))}
                     </div>
-                    <label className="grid gap-2 pt-2 text-sm font-medium text-slate-900">
-                      <span className="flex items-center gap-2">
-                        <Languages className="h-4 w-4 text-slate-500" />
-                        Source language hint
-                      </span>
-                      <select
-                        className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-                        onChange={(event) => setLanguage(event.target.value)}
-                        value={language}
-                      >
-                        {STT_LANGUAGE_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <span className="text-xs font-normal leading-5 text-slate-500">
-                        Optional for the Whisper lane and localization pipeline. `auto` keeps
-                        language detection in the manual backend.
-                      </span>
-                    </label>
-                    <label className="grid gap-2 pt-2 text-sm font-medium text-slate-900">
-                      <span className="flex items-center gap-2">
-                        <Languages className="h-4 w-4 text-slate-500" />
-                        Target localization language
-                      </span>
-                      <select
-                        className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-                        onChange={(event) => setTargetLanguage(event.target.value)}
-                        value={targetLanguage}
-                      >
-                        {TARGET_LANGUAGE_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <span className="text-xs font-normal leading-5 text-slate-500">
-                        The first orchestration pair translates with MADLAD and synthesizes a
-                        preview with Qwen3-TTS.
-                      </span>
-                    </label>
                   </div>
+                )}
+
+                {vad.segments.length > 0 ? (
+                  <div>
+                    <h3 className="mb-2 text-sm font-medium text-slate-900">Detected segments</h3>
+                    <div className="space-y-2">
+                      {vad.segments.map((seg) => (
+                        <div
+                          className="rounded-lg border border-slate-200 bg-white px-4 py-3"
+                          key={`${seg.start_ms}-${seg.end_ms}`}
+                        >
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="font-medium text-slate-950">
+                              {fmtMs(seg.start_ms)} &ndash; {fmtMs(seg.end_ms)}
+                            </span>
+                            <span className="text-xs text-slate-500">{fmtMs(seg.duration_ms)}</span>
+                          </div>
+                          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                            <Bar label="Avg" tone="cyan" value={seg.average_probability} />
+                            <Bar label="Peak" tone="emerald" value={seg.peak_probability} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-500">No speech crossed the threshold.</p>
+                )}
+              </div>
+            ) : (
+              <EmptyState>Run VAD to detect speech segments.</EmptyState>
+            )}
+          </TabsContent>
+
+          {/* ─ STT ─ */}
+          <TabsContent value="stt">
+            {sttRes ? (
+              <div className="space-y-6">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <Metric detail={sttRes.task} label="Language" value={langLabel(sttRes.language)} />
+                  <Metric
+                    detail={`threshold ${sttRes.threshold.toFixed(2)}`}
+                    label="Segments"
+                    value={String(sttRes.segment_count)}
+                  />
+                  <Metric
+                    detail={`${sttRes.sample_rate} Hz`}
+                    label="Duration"
+                    value={fmtMs(sttRes.duration_ms)}
+                  />
+                  <Metric
+                    detail={sttRes.model}
+                    label="Model"
+                    value={sttRes.repository_model_name}
+                  />
                 </div>
 
-                <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                  <div className="flex items-start gap-2">
-                    <BadgeInfo className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
-                    <p>
-                      Audio is resampled to 16 kHz before VAD. Non-PCM WAV, corrupt
-                      containers, and oversized files are rejected with explicit reasons.
+                <div>
+                  <h3 className="mb-2 text-sm font-medium text-slate-900">Transcript</h3>
+                  <div className="rounded-lg border border-slate-200 bg-white p-4">
+                    <p className="whitespace-pre-wrap text-sm leading-7 text-slate-800">
+                      {sttRes.transcript || "No transcript returned."}
                     </p>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Button disabled={activeRun !== null} type="submit">
-                      {isRunningVad ? "Running VAD..." : "Run VAD Happy Path"}
-                    </Button>
-                    <Button
-                      disabled={activeRun !== null}
-                      onClick={() => {
-                        void runWorkerRoute("stt");
-                      }}
-                      type="button"
-                      variant="outline"
-                    >
-                      {isRunningStt ? "Running STT..." : "Run Audio -> VAD -> STT"}
-                    </Button>
-                    <Button
-                      disabled={activeRun !== null}
-                      onClick={() => {
-                        void runWorkerRoute("localize");
-                      }}
-                      type="button"
-                      variant="secondary"
-                    >
-                      {isRunningLocalization ? "Running Localization..." : "Run Localization Preview"}
-                    </Button>
-                  </div>
                 </div>
 
-                {error ? (
-                  <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                    {error}
-                  </p>
-                ) : null}
-              </form>
-            </CardContent>
-          </Card>
-
-          <Card className="border-slate-200/70 bg-slate-950 text-white shadow-sm">
-            <CardHeader>
-              <CardTitle className="text-lg">Bootstrap State</CardTitle>
-              <CardDescription className="text-slate-300">
-                Worker and Triton readiness for the baseline profile.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-3 text-sm">
-              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
-                <div className="text-slate-400">Worker profile</div>
-                <div className="font-medium text-white">
-                  {ready?.profile ?? "loading"}
-                </div>
-              </div>
-              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
-                <div className="text-slate-400">Triton model</div>
-                <div className="font-medium text-white">
-                  {ready?.triton.model_name ?? "silero_vad"}
-                </div>
-              </div>
-              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
-                <div className="text-slate-400">Ready</div>
-                <div className="font-medium text-white">
-                  {ready?.triton.model_ready ? "yes" : "waiting"}
-                </div>
-              </div>
-              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
-                <div className="text-slate-400">Triton status</div>
-                <div className="font-medium text-white">
-                  {ready?.triton.status ?? "loading"}
-                </div>
-              </div>
-              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
-                <div className="text-slate-400">Summary</div>
-                <div className="font-medium text-white">
-                  {ready?.triton.summary ?? "waiting for bootstrap response"}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </section>
-
-        <section className="grid gap-6 lg:grid-cols-[0.86fr_1.14fr]">
-          <Card className="border-slate-200/70 bg-white/90 shadow-sm">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <FileAudio2 className="h-5 w-5 text-slate-600" />
-                Approved Catalog
-              </CardTitle>
-              <CardDescription>
-                Only explicit allowlist entries can enter the runtime download lane.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-3">
-              {catalog?.models.map((model) => (
-                <div
-                  className="rounded-xl border border-slate-200 px-3 py-3"
-                  key={model.model_id}
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="font-medium text-slate-950">{model.model_id}</div>
-                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                        {model.stage}
-                      </div>
-                    </div>
-                    <div className="rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">
-                      {model.license_name}
-                    </div>
-                  </div>
-                  <p className="mt-2 text-sm text-slate-600">{model.notes}</p>
-                  <div className="mt-2 text-xs text-slate-500">
-                    auto-download: {model.approved_for_auto_download ? "yes" : "no"} / serve:{" "}
-                    {model.serve_status}
-                  </div>
-                </div>
-              )) ?? <p className="text-sm text-slate-500">Loading catalog...</p>}
-            </CardContent>
-          </Card>
-
-          <div className="grid gap-6">
-            <Card className="border-slate-200/70 bg-white/90 shadow-sm">
-              <CardHeader>
-                <CardTitle>Speech Segments</CardTitle>
-                <CardDescription>
-                  Inspect the segment list and the per-window score trace returned by the worker.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="grid gap-5">
-                {result ? (
-                  <>
-                    <div className="grid gap-3 md:grid-cols-5">
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          file
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {result.filename}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          duration
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {result.duration_ms} ms
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          sample rate
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {result.sample_rate} Hz
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          segments
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {result.segment_count}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          speech windows
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {speechWindowCount} / {result.window_scores.length}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-medium text-slate-950">Window score trace</div>
-                          <div className="text-xs text-slate-500">
-                            First {windowScoresPreview.length} of {result.window_scores.length} windows.
-                          </div>
-                        </div>
-                        <div className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700">
-                          threshold {formatThreshold(result.threshold)}
-                        </div>
-                      </div>
-                      {windowScoresPreview.length > 0 ? (
+                {sttRes.segments.length > 0 && (
+                  <div>
+                    <h3 className="mb-2 text-sm font-medium text-slate-900">Segments</h3>
+                    <div className="space-y-2">
+                      {sttRes.segments.map((seg) => (
                         <div
-                          className="grid h-36 items-end gap-[2px]"
-                          style={{
-                            gridTemplateColumns: `repeat(${windowScoresPreview.length}, minmax(0, 1fr))`,
-                          }}
+                          className="rounded-lg border border-slate-200 bg-white px-4 py-3"
+                          key={`${seg.start_ms}-${seg.end_ms}`}
                         >
-                          {windowScoresPreview.map((score, index) => {
-                            const active = score >= result.threshold;
-                            const barHeight = `${Math.max(6, Math.min(100, score * 100))}%`;
-
-                            return (
-                              <div
-                                className="flex h-full items-end"
-                                key={`${index}-${score}`}
-                                title={`window ${index + 1}: ${score.toFixed(4)}`}
-                              >
-                                <div
-                                  className={`w-full rounded-t-sm ${active ? "bg-emerald-500" : "bg-slate-300"}`}
-                                  style={{ height: barHeight }}
-                                />
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <p className="text-sm text-slate-500">No window scores were returned.</p>
-                      )}
-                    </div>
-
-                    {result.segments.length > 0 ? (
-                      <div className="grid gap-3">
-                        {result.segments.map((segment, index) => (
-                          <div
-                            className="rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm"
-                            key={`${segment.start_ms}-${segment.end_ms}`}
-                          >
-                            <div className="flex items-center justify-between gap-3">
-                              <div>
-                                <div className="text-sm font-medium text-slate-950">
-                                  Segment {index + 1}
-                                </div>
-                                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                                  {segment.start_ms} ms to {segment.end_ms} ms
-                                </div>
-                              </div>
-                              <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
-                                {segment.duration_ms} ms
-                              </div>
-                            </div>
-
-                            <div className="mt-3 grid gap-3 md:grid-cols-2">
-                              <div>
-                                <div className="flex items-center justify-between text-xs text-slate-500">
-                                  <span>Average probability</span>
-                                  <span>{segment.average_probability}</span>
-                                </div>
-                                <div className="mt-1 h-2 rounded-full bg-slate-100">
-                                  <div
-                                    className="h-2 rounded-full bg-emerald-500"
-                                    style={{ width: `${Math.min(100, segment.average_probability * 100)}%` }}
-                                  />
-                                </div>
-                              </div>
-                              <div>
-                                <div className="flex items-center justify-between text-xs text-slate-500">
-                                  <span>Peak probability</span>
-                                  <span>{segment.peak_probability}</span>
-                                </div>
-                                <div className="mt-1 h-2 rounded-full bg-slate-100">
-                                  <div
-                                    className="h-2 rounded-full bg-sky-500"
-                                    style={{ width: `${Math.min(100, segment.peak_probability * 100)}%` }}
-                                  />
-                                </div>
-                              </div>
-                            </div>
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="font-medium text-slate-950">
+                              {fmtMs(seg.start_ms)} &ndash; {fmtMs(seg.end_ms)}
+                            </span>
+                            <span className="text-xs text-slate-500">{fmtMs(seg.duration_ms)}</span>
                           </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                        No speech segments crossed the current threshold.
+                          <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-700">
+                            {seg.text || "\u2014"}
+                          </p>
+                          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                            <Bar label="Avg" tone="cyan" value={seg.average_probability} />
+                            <Bar label="Peak" tone="emerald" value={seg.peak_probability} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <EmptyState>Run STT to transcribe speech.</EmptyState>
+            )}
+          </TabsContent>
+
+          {/* ─ Localize ─ */}
+          <TabsContent value="localize">
+            {loc ? (
+              <div className="space-y-6">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <Metric label="Source" value={langLabel(loc.source_language)} />
+                  <Metric label="Target" value={langLabel(loc.target_language)} />
+                  <Metric
+                    label="Status"
+                    tone={loc.status === "ok" ? "ready" : "warning"}
+                    value={loc.status}
+                  />
+                  <Metric label="Duration" value={fmtMs(loc.duration_ms)} />
+                </div>
+
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <Stage label="STT" model={loc.models.stt} status={loc.stages.stt.status} />
+                  <Stage
+                    label="Translation"
+                    model={loc.models.translation}
+                    status={loc.stages.translation.status}
+                  />
+                  <Stage label="TTS" model={loc.models.tts} status={loc.stages.tts.status} />
+                </div>
+
+                {loc.message && (
+                  <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {loc.message}
+                  </p>
+                )}
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div>
+                    <h3 className="mb-2 text-sm font-medium text-slate-900">Transcript</h3>
+                    <div className="rounded-lg border border-slate-200 bg-white p-4">
+                      <p className="whitespace-pre-wrap text-sm leading-7 text-slate-800">
+                        {loc.transcript || "\u2014"}
                       </p>
+                    </div>
+                  </div>
+                  <div>
+                    <h3 className="mb-2 text-sm font-medium text-slate-900">Translation</h3>
+                    <div className="rounded-lg border border-slate-200 bg-white p-4">
+                      <p className="whitespace-pre-wrap text-sm leading-7 text-slate-800">
+                        {loc.translated_text || "\u2014"}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <h3 className="text-sm font-medium text-slate-900">Preview audio</h3>
+                    {loc.stages.tts.sample_rate && (
+                      <span className="text-xs text-slate-500">
+                        {loc.stages.tts.sample_rate} Hz
+                      </span>
                     )}
-                  </>
-                ) : (
-                  <div className="rounded-xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
-                    The result panel fills once the VAD happy path returns segment data.
                   </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card className="border-slate-200/70 bg-white/90 shadow-sm">
-              <CardHeader>
-                <CardTitle>Whisper STT</CardTitle>
-                <CardDescription>
-                  The worker reuses Silero VAD, then sends each detected speech segment to the
-                  manual Whisper Triton backend.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="grid gap-5">
-                {sttResult ? (
-                  <>
-                    <div className="grid gap-3 md:grid-cols-5">
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          model
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {sttResult.repository_model_name}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          task
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {sttResult.task}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          language
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {sttResult.language}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          segments
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {sttResult.segment_count}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          threshold
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {formatThreshold(sttResult.threshold)}
-                        </div>
-                      </div>
+                  {audioSrc ? (
+                    <audio className="w-full" controls src={audioSrc} />
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+                      No audio preview available.
                     </div>
-
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
-                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                        aggregated transcript
-                      </div>
-                      <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-slate-800">
-                        {sttResult.transcript || "No transcript text was returned for the detected speech segments."}
-                      </p>
-                    </div>
-
-                    {sttResult.segments.length > 0 ? (
-                      <div className="grid gap-3">
-                        {sttResult.segments.map((segment, index) => (
-                          <div
-                            className="rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm"
-                            key={`${segment.start_ms}-${segment.end_ms}-stt`}
-                          >
-                            <div className="flex items-center justify-between gap-3">
-                              <div>
-                                <div className="text-sm font-medium text-slate-950">
-                                  Transcript segment {index + 1}
-                                </div>
-                                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                                  {segment.start_ms} ms to {segment.end_ms} ms
-                                </div>
-                              </div>
-                              <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
-                                {segment.duration_ms} ms
-                              </div>
-                            </div>
-                            <p className="mt-3 rounded-lg bg-slate-50 px-3 py-3 text-sm leading-6 text-slate-800">
-                              {segment.text || "No text returned for this segment."}
-                            </p>
-                            <div className="mt-3 grid gap-3 md:grid-cols-2">
-                              <div>
-                                <div className="flex items-center justify-between text-xs text-slate-500">
-                                  <span>Average probability</span>
-                                  <span>{segment.average_probability}</span>
-                                </div>
-                                <div className="mt-1 h-2 rounded-full bg-slate-100">
-                                  <div
-                                    className="h-2 rounded-full bg-emerald-500"
-                                    style={{ width: `${Math.min(100, segment.average_probability * 100)}%` }}
-                                  />
-                                </div>
-                              </div>
-                              <div>
-                                <div className="flex items-center justify-between text-xs text-slate-500">
-                                  <span>Peak probability</span>
-                                  <span>{segment.peak_probability}</span>
-                                </div>
-                                <div className="mt-1 h-2 rounded-full bg-slate-100">
-                                  <div
-                                    className="h-2 rounded-full bg-sky-500"
-                                    style={{ width: `${Math.min(100, segment.peak_probability * 100)}%` }}
-                                  />
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                        No speech segments were detected, so Whisper was not invoked.
-                      </p>
-                    )}
-                  </>
-                ) : (
-                  <div className="rounded-xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
-                    Run the STT lane to inspect the aggregated transcript and per-segment text.
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card className="border-slate-200/70 bg-white/90 shadow-sm">
-              <CardHeader>
-                <CardTitle>Localization Preview</CardTitle>
-                <CardDescription>
-                  End-to-end orchestration: Whisper transcript to MADLAD translation to Qwen3-TTS
-                  preview audio.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="grid gap-5">
-                {localizeResult ? (
-                  <>
-                    <div className="grid gap-3 md:grid-cols-4">
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          source
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {localizeResult.source_language}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          target
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {localizeResult.target_language}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          pipeline
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {localizeResult.models.translation} + {localizeResult.models.tts}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          status
-                        </div>
-                        <div className="mt-1 text-sm font-medium text-slate-950">
-                          {localizeResult.status}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid gap-3 md:grid-cols-3">
-                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-sm font-medium text-slate-950">STT stage</div>
-                          <div className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700">
-                            {localizeResult.stages.stt.status}
-                          </div>
-                        </div>
-                        <div className="mt-2 text-xs uppercase tracking-[0.2em] text-slate-500">
-                          {localizeResult.models.stt}
-                        </div>
-                        <p className="mt-3 text-sm leading-6 text-slate-700">
-                          {localizeResult.stages.stt.message ??
-                            localizeResult.stages.stt.transcript ??
-                            "Waiting for transcript."}
-                        </p>
-                      </div>
-                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-sm font-medium text-slate-950">Translation stage</div>
-                          <div className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700">
-                            {localizeResult.stages.translation.status}
-                          </div>
-                        </div>
-                        <div className="mt-2 text-xs uppercase tracking-[0.2em] text-slate-500">
-                          {localizeResult.models.translation}
-                        </div>
-                        <p className="mt-3 text-sm leading-6 text-slate-700">
-                          {localizeResult.stages.translation.message ??
-                            localizeResult.stages.translation.reason ??
-                            localizeResult.stages.translation.text ??
-                            "Waiting for translated text."}
-                        </p>
-                      </div>
-                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-sm font-medium text-slate-950">TTS stage</div>
-                          <div className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700">
-                            {localizeResult.stages.tts.status}
-                          </div>
-                        </div>
-                        <div className="mt-2 text-xs uppercase tracking-[0.2em] text-slate-500">
-                          {localizeResult.models.tts}
-                        </div>
-                        <p className="mt-3 text-sm leading-6 text-slate-700">
-                          {localizeResult.stages.tts.message ??
-                            localizeResult.stages.tts.reason ??
-                            (localizationAudioPreview
-                              ? `${localizeResult.stages.tts.duration_ms} ms preview ready`
-                              : "Waiting for synthesized preview.")}
-                        </p>
-                      </div>
-                    </div>
-
-                    {localizeResult.message ? (
-                      <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                        {localizeResult.message}
-                      </p>
-                    ) : null}
-
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          transcript
-                        </div>
-                        <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-slate-800">
-                          {localizeResult.transcript || "No transcript text is available."}
-                        </p>
-                      </div>
-                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          translated text
-                        </div>
-                        <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-slate-800">
-                          {localizeResult.translated_text || "No translated text is available."}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-medium text-slate-950">Synthesized preview</div>
-                          <div className="text-xs text-slate-500">
-                            The worker wraps the TTS waveform as a WAV asset for browser playback.
-                          </div>
-                        </div>
-                        {localizeResult.stages.tts.sample_rate ? (
-                          <div className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700">
-                            {localizeResult.stages.tts.sample_rate} Hz
-                          </div>
-                        ) : null}
-                      </div>
-                      {localizationAudioPreview ? (
-                        <audio className="mt-4 w-full" controls src={localizationAudioPreview}>
-                          <track kind="captions" />
-                        </audio>
-                      ) : (
-                        <p className="mt-4 text-sm text-slate-500">
-                          No preview audio is available for the current run.
-                        </p>
-                      )}
-                    </div>
-                  </>
-                ) : (
-                  <div className="rounded-xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
-                    Run the localization preview to inspect stage-by-stage transcript,
-                    translation, and synthesized audio output.
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-        </section>
-      </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <EmptyState>Run Localize for end-to-end speech translation.</EmptyState>
+            )}
+          </TabsContent>
+        </Tabs>
+      </section>
     </main>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Shared components                                                  */
+/* ------------------------------------------------------------------ */
+
+function Metric({
+  detail,
+  label,
+  tone,
+  value,
+}: {
+  detail?: string;
+  label: string;
+  tone?: "ready" | "warning";
+  value: string;
+}) {
+  return (
+    <div
+      className={`rounded-lg border p-3 ${
+        tone === "ready"
+          ? "border-emerald-200 bg-emerald-50"
+          : tone === "warning"
+            ? "border-amber-200 bg-amber-50"
+            : "border-slate-200 bg-white"
+      }`}
+    >
+      <div className="text-xs text-slate-500">{label}</div>
+      <div className="mt-1 truncate text-sm font-semibold text-slate-950">{value}</div>
+      {detail && <div className="mt-0.5 truncate text-xs text-slate-500">{detail}</div>}
+    </div>
+  );
+}
+
+function Bar({
+  label,
+  tone,
+  value,
+}: {
+  label: string;
+  tone: "cyan" | "emerald";
+  value: number;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-8 shrink-0 text-xs text-slate-500">{label}</span>
+      <div className="h-1.5 flex-1 rounded-full bg-slate-200">
+        <div
+          className={`h-1.5 rounded-full ${tone === "emerald" ? "bg-emerald-500" : "bg-cyan-500"}`}
+          style={{ width: `${Math.min(100, value * 100)}%` }}
+        />
+      </div>
+      <span className="w-8 shrink-0 text-right text-xs tabular-nums text-slate-600">
+        {fmtProb(value)}
+      </span>
+    </div>
+  );
+}
+
+function Stage({
+  label,
+  model,
+  status,
+}: {
+  label: string;
+  model: string;
+  status: string;
+}) {
+  const ok = status === "ok";
+  return (
+    <div
+      className={`rounded-lg border p-3 ${ok ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-slate-50"}`}
+    >
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium text-slate-950">{label}</span>
+        <span className={`text-xs font-medium ${ok ? "text-emerald-700" : "text-slate-500"}`}>
+          {status}
+        </span>
+      </div>
+      <div className="mt-1 truncate text-xs text-slate-500">{model}</div>
+    </div>
+  );
+}
+
+function EmptyState({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-12 text-center text-sm text-slate-500">
+      {children}
+    </div>
   );
 }

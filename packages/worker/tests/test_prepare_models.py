@@ -4,9 +4,11 @@ import sys
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import pipeline.prepare_models as prepare_models_module
 from pipeline.prepare_models import prepare_model_repository, write_manifest
 
 
@@ -105,6 +107,76 @@ class PrepareModelsTest(unittest.TestCase):
             self.assertIn('backend: "python"', config_template.read_text(encoding="utf-8"))
             self.assertIn("Manual Triton Python backend template", model_template.read_text(encoding="utf-8"))
             self.assertIn("Bring-up steps", readme.read_text(encoding="utf-8"))
+
+    def test_materialize_manual_models_uses_runtime_materializer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+
+            def fake_materializer(output_root, spec, cache_dir):
+                _ = cache_dir
+                target_root = output_root / spec.repository_model_name
+                version_root = target_root / "1"
+                upstream_root = version_root / "upstream"
+                version_root.mkdir(parents=True, exist_ok=True)
+                upstream_root.mkdir(parents=True, exist_ok=True)
+                (target_root / "config.pbtxt").write_text('backend: "python"\n', encoding="utf-8")
+                (version_root / "model.py").write_text("# runtime\n", encoding="utf-8")
+                return {
+                    "installed": True,
+                    "materialization_mode": "opt_in_manual_prepare",
+                    "repository_path": str(version_root.relative_to(output_root)),
+                    "runtime_files": [
+                        str((target_root / "config.pbtxt").relative_to(output_root)),
+                        str((version_root / "model.py").relative_to(output_root)),
+                        str(upstream_root.relative_to(output_root)),
+                    ],
+                    "snapshot_allow_patterns": list(spec.snapshot_allow_patterns),
+                }
+
+            with patch("pipeline.prepare_models.materialize_manual_runtime_model", side_effect=fake_materializer):
+                manifest = prepare_model_repository(
+                    output_root=temp_root / "repository",
+                    model_ids=["whisper_large_v3_turbo", "madlad400_3b_mt", "qwen3_tts_0_6b"],
+                    materialize_manual_models=True,
+                )
+
+            records = {record["model_id"]: record for record in manifest["models"]}
+            self.assertTrue(manifest["materialize_manual_models"])
+            self.assertEqual(records["whisper_large_v3_turbo"]["materialization_mode"], "opt_in_manual_prepare")
+            self.assertTrue(records["madlad400_3b_mt"]["installed"])
+            self.assertIn("config.pbtxt", records["qwen3_tts_0_6b"]["runtime_files"][0])
+
+    def test_materialize_manual_models_uses_runtime_materializer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            captured: list[str] = []
+            original_materializer = prepare_models_module.materialize_manual_runtime_model
+
+            def fake_materializer(output_root, spec, cache_dir):
+                _ = cache_dir
+                captured.append(spec.model_id)
+                runtime_dir = output_root / spec.repository_model_name / "1"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                return {
+                    "installed": True,
+                    "materialization_mode": "opt_in_manual_prepare",
+                    "repository_path": str(runtime_dir.relative_to(output_root)),
+                }
+
+            prepare_models_module.materialize_manual_runtime_model = fake_materializer
+            try:
+                manifest = prepare_model_repository(
+                    output_root=temp_root / "repository",
+                    model_ids=["whisper_large_v3_turbo", "madlad400_3b_mt"],
+                    materialize_manual_models=True,
+                )
+            finally:
+                prepare_models_module.materialize_manual_runtime_model = original_materializer
+
+        self.assertEqual(captured, ["whisper_large_v3_turbo", "madlad400_3b_mt"])
+        for record in manifest["models"]:
+            self.assertTrue(record["installed"])
+            self.assertEqual(record["materialization_mode"], "opt_in_manual_prepare")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ The repo separates models into three lanes:
 2. `manual-download + planned-serve`
 3. `hold`
 
-Only lane 1 participates in startup automation.
+Lane 1 participates in startup automation. Lane 2 is materialized during `bun run dev` (localize profile) or via `bun run download:weights` + `bun run prepare:models`.
 
 ## Approval Criteria
 
@@ -25,73 +25,65 @@ A model can enter the catalog only if the source is explicit and the artifact pa
 
 ## State Machine
 
-The state machine is intentionally small:
-
 - `auto-download + auto-serve`
   - eligible for `prepare_models`
   - must have pinned upstream revision, repository model name, and at least one checked artifact
   - must keep `approved_for_auto_download=true`
 - `manual-download + planned-serve`
   - cataloged and reviewable
-  - may be referenced by later streams, but is not installed by the automatic baseline materializer
+  - not installed by the baseline materializer
+  - materialized by the localize profile (`bun run dev` or `bun run prepare:models`)
+  - weights can be pre-downloaded via `bun run download:weights`
   - must keep a pinned upstream repository and revision
   - should declare the expected Triton repository model name and tensor contract before worker endpoints depend on it
 - `hold`
   - catalog only
-  - no automatic download path
+  - no download path
   - requires an explicit provenance decision before promotion
 
 ## Profiles
 
-The worker materializer supports these profiles:
-
-- `baseline`
-  - `silero_vad` only
-  - keeps `docker compose up` predictable
-- `stt`
-  - `silero_vad` plus Whisper metadata
-  - useful when Stream C needs a planning manifest without changing the runtime baseline
-  - emits the manual Whisper repository name and tensor contract in `MANIFEST.json`
-- `catalog`
-  - the full catalog
-  - emits the policy inventory and audit trail without widening automatic download behavior
-- `localize`
-  - `silero_vad`, Whisper metadata, MADLAD metadata, and Qwen3-TTS metadata
-  - useful when the operator wants one manifest plus manual backend scaffolds for the first localization flow
+- `baseline` — `silero_vad` only
+- `stt` — `silero_vad` + Whisper metadata
+- `localize` — `silero_vad` + Whisper + MADLAD + Qwen3-TTS (default for `bun run dev`)
+- `catalog` — full catalog inventory without changing runtime behavior
 
 ## Current Catalog
 
 | ID | Upstream | License | Lane | Next action |
 |----|----------|---------|------|-------------|
-| `silero_vad` | `onnx-community/silero-vad` | MIT | `auto-download + auto-serve` | Keep the baseline path pinned and runnable. |
-| `whisper_large_v3_turbo` | `openai/whisper-large-v3-turbo` | MIT | `manual-download + planned-serve` | Provision the manual Triton Whisper repository and validate the `/api/stt` happy path. |
-| `madlad400_3b_mt` | `google/madlad400-3b-mt` | Apache 2.0 | `manual-download + planned-serve` | Provision the manual MADLAD Triton repository and validate the translation stage in `/api/localize`. |
-| `cosyvoice3_0_5b` | `FunAudioLLM/Fun-CosyVoice3-0.5B-2512` | Apache 2.0 | `manual-download + planned-serve` | Define the voice-cloning policy and streaming contract. |
-| `qwen3_tts_0_6b` | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | Apache 2.0 | `manual-download + planned-serve` | Provision the manual Qwen3-TTS Triton repository and validate the preview stage in `/api/localize`. |
-| `bs_roformer` | pending weight provenance review | pending | `hold` | Pin the exact redistributable weight source and review provenance. |
+| `silero_vad` | `onnx-community/silero-vad` | MIT | `auto-download + auto-serve` | Keep baseline pinned. |
+| `whisper_large_v3_turbo` | `openai/whisper-large-v3-turbo` | MIT | `manual-download + planned-serve` | Validate opt-in runtime. |
+| `madlad400_3b_mt` | `google/madlad400-3b-mt` | Apache 2.0 | `manual-download + planned-serve` | Validate opt-in runtime. |
+| `cosyvoice3_0_5b` | `FunAudioLLM/Fun-CosyVoice3-0.5B-2512` | Apache 2.0 | `manual-download + planned-serve` | Define voice-cloning policy. |
+| `qwen3_tts_0_6b` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | Apache 2.0 | `manual-download + planned-serve` | Validate CustomVoice runtime. |
+| `bs_roformer` | pending weight provenance review | pending | `hold` | Pin redistributable weight source. |
 
 ## Startup Sequence
 
-`docker compose up --build` runs this sequence:
+### Local development (`bun run dev`)
 
-1. `model-init`
-2. `triton`
-3. `worker`
-4. `web`
+1. `prepare_models --profile localize --materialize-manual-models` materializes all models into `model_repository/`
+2. Triton starts (Docker fallback if no local binary; custom image built for localize profile)
+3. Worker + Web start
 
-`model-init` executes:
+### Docker Compose (`docker compose up --build`)
+
+1. `model-init` runs `prepare_models`
+2. `triton` boots with `model_repository/` mounted
+3. `worker` connects to Triton gRPC
+4. `web` serves the UI
+
+## Weight Downloads
 
 ```sh
-python -m pipeline.prepare_models --profile baseline --output-root /models
+bun run download:weights                              # all downloadable models
+bun run download:weights -- --model-id whisper_large_v3_turbo  # specific model
+bun run download:weights -- --profile localize        # all localize models
+bun run download:weights -- --list                    # show downloadable models
 ```
 
-This writes:
-
-- `/models/silero_vad/1/model.onnx`
-- `/models/MANIFEST.json`
-
-The manifest now includes the selected profile, the policy lane state machine, and the next action for each catalog entry.
-When `--manual-stub-root` is provided, it also records where the generated manual Triton scaffolds were written.
+Weights are cached in `.cache/huggingface/` and reused by `prepare_models` during `bun run dev`.
 
 ## Why the Baseline Is Silero VAD
 
@@ -103,20 +95,8 @@ When `--manual-stub-root` is provided, it also records where the generated manua
 
 ## Planned Serving Strategy
 
-- `Whisper large-v3-turbo`
-  - keep auto-download off
-  - serve via a manual Triton Python backend named `whisper_large_v3_turbo`
-  - worker contract is `audio_pcm`, `sample_rate`, `task`, `language`, `prompt` -> `transcript`
-  - worker runs Silero VAD first and transcribes one detected speech segment at a time
-- `MADLAD-400 3B`
-  - selected as the first translation stage for `/api/localize`
-  - manual Triton Python backend named `madlad400_3b_mt`
-  - worker contract is `text`, `source_language`, `target_language` -> `translated_text`
-- `Qwen3-TTS`
-  - selected as the first preview TTS stage for `/api/localize` and `/api/tts`
-  - manual Triton Python backend named `qwen3_tts_0_6b`
-  - worker contract is `text`, `language`, `speaker_prompt` -> `audio_pcm`, `sample_rate`
-- `CosyVoice3`
-  - remains deferred until the voice-cloning policy and asset workflow are explicit
-- `BS-RoFormer`
-  - remain on hold until the exact redistributable weight source is pinned and reviewed
+- **Whisper large-v3-turbo** — Triton Python backend `whisper_large_v3_turbo`, contract: `audio_pcm`, `sample_rate`, `task`, `language`, `prompt` -> `transcript`
+- **MADLAD-400 3B** — Triton Python backend `madlad400_3b_mt`, contract: `text`, `source_language`, `target_language` -> `translated_text`
+- **Qwen3-TTS** — Triton Python backend `qwen3_tts_0_6b`, contract: `text`, `language`, `speaker_prompt` -> `audio_pcm`, `sample_rate`
+- **CosyVoice3** — deferred until voice-cloning policy is explicit
+- **BS-RoFormer** — on hold until redistributable weight source is pinned

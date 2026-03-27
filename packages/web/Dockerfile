@@ -4,7 +4,10 @@ WORKDIR /app
 COPY packages/web/package.json packages/web/bun.lock* ./
 RUN bun install --frozen-lockfile
 
-COPY packages/web/ .
+COPY packages/web/src ./src
+COPY packages/web/components.json ./components.json
+COPY packages/web/tsconfig.json ./tsconfig.json
+COPY packages/web/vite.config.ts ./vite.config.ts
 RUN bun --bun run build
 
 FROM oven/bun:1

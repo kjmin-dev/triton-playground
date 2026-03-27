@@ -63,7 +63,9 @@ class TritonReadinessTest(unittest.TestCase):
                 return False
 
             def get_model_repository_index(self):
-                return [{"name": "other_model", "state": "READY"}]
+                class _Resp:
+                    models = [{"name": "other_model", "state": "READY"}]
+                return _Resp()
 
         client = object.__new__(TritonVadClient)
         client._grpcclient = object()

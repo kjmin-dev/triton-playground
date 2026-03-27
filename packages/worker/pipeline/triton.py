@@ -120,6 +120,41 @@ def _model_index_entry_state(entry: object) -> str | None:
     return str(value) if value is not None else None
 
 
+def check_readiness(client: object, url: str, model_name: str) -> "TritonReadiness":
+    """Shared readiness check used by all Triton client classes."""
+    try:
+        model_present: bool | None = None
+        model_state: str | None = None
+        get_model_repository_index = getattr(client, "get_model_repository_index", None)
+        if callable(get_model_repository_index):
+            try:
+                model_index = get_model_repository_index()
+            except Exception:
+                model_index = None
+
+            if model_index is not None:
+                model_present = False
+                for entry in model_index.models:
+                    if _model_index_entry_name(entry) == model_name:
+                        model_present = True
+                        model_state = _model_index_entry_state(entry)
+                        break
+
+        return TritonReadiness.from_status(
+            server_url=url,
+            server_ready=bool(client.is_server_ready()),
+            server_live=bool(client.is_server_live()),
+            model_ready=bool(client.is_model_ready(model_name)),
+            model_present=model_present,
+            model_state=model_state,
+            model_name=model_name,
+        )
+    except Exception as exc:
+        raise TritonUnavailableError(
+            describe_triton_error(url=url, action="Querying Triton readiness", exc=exc)
+        ) from exc
+
+
 def inspect_model_repository(
     repository_root: str | None,
     model_name: str = "silero_vad",
@@ -245,37 +280,7 @@ class TritonVadClient:
             ) from exc
 
     def readiness(self) -> TritonReadiness:
-        try:
-            model_present: bool | None = None
-            model_state: str | None = None
-            get_model_repository_index = getattr(self._client, "get_model_repository_index", None)
-            if callable(get_model_repository_index):
-                try:
-                    model_index = get_model_repository_index()
-                except Exception:
-                    model_index = None
-
-                if model_index is not None:
-                    model_present = False
-                    for entry in model_index:
-                        if _model_index_entry_name(entry) == self._model_name:
-                            model_present = True
-                            model_state = _model_index_entry_state(entry)
-                            break
-
-            return TritonReadiness.from_status(
-                server_url=self._url,
-                server_ready=bool(self._client.is_server_ready()),
-                server_live=bool(self._client.is_server_live()),
-                model_ready=bool(self._client.is_model_ready(self._model_name)),
-                model_present=model_present,
-                model_state=model_state,
-                model_name=self._model_name,
-            )
-        except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
-            raise TritonUnavailableError(
-                describe_triton_error(url=self._url, action="Querying Triton readiness", exc=exc)
-            ) from exc
+        return check_readiness(self._client, self._url, self._model_name)
 
     def score_windows(self, windows: "np.ndarray") -> list[float]:
         readiness = self.readiness()
@@ -285,6 +290,8 @@ class TritonVadClient:
         import numpy as np
 
         state = np.zeros((2, 1, 128), dtype=np.float32)
+        sr_input = self._grpcclient.InferInput("sr", [1], "INT64")
+        sr_input.set_data_from_numpy(np.array([16000], dtype=np.int64))
         probabilities: list[float] = []
 
         try:
@@ -302,7 +309,7 @@ class TritonVadClient:
 
                 response = self._client.infer(
                     model_name=self._model_name,
-                    inputs=[audio_input, state_input],
+                    inputs=[audio_input, state_input, sr_input],
                     outputs=outputs,
                 )
 

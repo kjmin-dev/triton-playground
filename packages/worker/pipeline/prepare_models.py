@@ -23,6 +23,7 @@ from pipeline.model_catalog import (
     get_model_spec,
     get_profile_model_ids,
 )
+from pipeline.manual_runtime import materialize_manual_runtime_model
 
 DownloadFn = Callable[[ModelSpec, ModelArtifact, Path | None], Path]
 MANIFEST_SCHEMA_VERSION = 2
@@ -288,6 +289,7 @@ def prepare_model_repository(
     cache_dir: Path | None = None,
     downloader: DownloadFn = _default_downloader,
     manual_stub_root: Path | None = None,
+    materialize_manual_models: bool = False,
 ) -> dict[str, object]:
     output_root.mkdir(parents=True, exist_ok=True)
     if manual_stub_root is not None:
@@ -300,6 +302,7 @@ def prepare_model_repository(
             "baseline_profile": "baseline",
             "planning_profiles": ["stt", "localize", "catalog"],
             "allowed_serve_statuses": [AUTO_DOWNLOAD_LANE, MANUAL_PLANNED_LANE, HOLD_LANE],
+            "manual_materialization_opt_in": True,
         },
         "models": [],
     }
@@ -311,10 +314,13 @@ def prepare_model_repository(
         record: dict[str, object] = spec.to_dict()
 
         if not spec.approved_for_auto_download:
-            record["installed"] = False
-            record["reason"] = _skip_reason(spec)
-            if spec.serve_status == MANUAL_PLANNED_LANE and manual_stub_root is not None:
-                record.update(_write_manual_stub(manual_stub_root, spec))
+            if spec.serve_status == MANUAL_PLANNED_LANE and materialize_manual_models:
+                record.update(materialize_manual_runtime_model(output_root, spec, cache_dir))
+            else:
+                record["installed"] = False
+                record["reason"] = _skip_reason(spec)
+                if spec.serve_status == MANUAL_PLANNED_LANE and manual_stub_root is not None:
+                    record.update(_write_manual_stub(manual_stub_root, spec))
             manifest["models"].append(record)
             continue
 
@@ -352,6 +358,11 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="optional directory for generated manual Triton backend scaffolds",
     )
+    parser.add_argument(
+        "--materialize-manual-models",
+        action="store_true",
+        help="explicitly install manual planned models into the Triton repository instead of generating metadata only",
+    )
     return parser.parse_args()
 
 
@@ -368,9 +379,11 @@ def main() -> None:
         model_ids=selected_model_ids,
         cache_dir=cache_dir,
         manual_stub_root=manual_stub_root,
+        materialize_manual_models=args.materialize_manual_models,
     )
     manifest["profile"] = args.profile
     manifest["selected_model_ids"] = selected_model_ids
+    manifest["materialize_manual_models"] = args.materialize_manual_models
 
     manifest_path = write_manifest(output_root, manifest)
     print(
@@ -379,6 +392,7 @@ def main() -> None:
                 "manifest_path": str(manifest_path),
                 "selected_model_ids": selected_model_ids,
                 "manual_stub_root": str(manual_stub_root) if manual_stub_root is not None else None,
+                "materialize_manual_models": args.materialize_manual_models,
             },
             indent=2,
         )

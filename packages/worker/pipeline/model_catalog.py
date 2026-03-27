@@ -51,9 +51,12 @@ class ModelSpec:
     next_action: str
     notes: str
     artifacts: tuple[ModelArtifact, ...] = ()
+    snapshot_allow_patterns: tuple[str, ...] = ()
     triton_backend: str | None = None
     triton_inputs: tuple[str, ...] = ()
     triton_outputs: tuple[str, ...] = ()
+    runtime_bundle: str | None = None
+    runtime_pip_packages: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.serve_status not in VALID_SERVE_STATUSES:
@@ -116,30 +119,68 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         repository_model_name=DEFAULT_WHISPER_REPOSITORY_MODEL_NAME,
         next_action="Provision the manual Triton Whisper repository and validate the /api/stt happy path against it.",
         notes=WHISPER_TRITON_NOTES,
+        snapshot_allow_patterns=(
+            "added_tokens.json",
+            "config.json",
+            "generation_config.json",
+            "merges.txt",
+            "model.safetensors",
+            "normalizer.json",
+            "preprocessor_config.json",
+            "special_tokens_map.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "vocab.json",
+        ),
         triton_backend=WHISPER_TRITON_BACKEND,
         triton_inputs=WHISPER_TRITON_INPUT_SPECS,
         triton_outputs=WHISPER_TRITON_OUTPUT_SPECS,
+        runtime_bundle="localize-runtime",
+        runtime_pip_packages=(
+            "torch>=2.6",
+            "transformers>=4.55",
+            "accelerate>=1.10",
+            "tiktoken>=0.9",
+            "safetensors>=0.5",
+        ),
     ),
     "madlad400_3b_mt": ModelSpec(
         model_id="madlad400_3b_mt",
         stage="translation",
         hf_repo_id="google/madlad400-3b-mt",
-        revision="main",
+        revision="fa184c675da0b5c9e1c8694fccd4e12e2d422094",
         license_name="Apache-2.0",
         approved_for_auto_download=False,
         serve_status=MANUAL_PLANNED_LANE,
         repository_model_name=DEFAULT_TRANSLATION_REPOSITORY_MODEL_NAME,
         next_action="Provision the manual MADLAD Triton repository and validate the translation stage in /api/localize.",
         notes=TRANSLATION_TRITON_NOTES,
+        snapshot_allow_patterns=(
+            "config.json",
+            "generation_config.json",
+            "model.safetensors",
+            "special_tokens_map.json",
+            "spiece.model",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ),
         triton_backend=TRANSLATION_TRITON_BACKEND,
         triton_inputs=TRANSLATION_TRITON_INPUT_SPECS,
         triton_outputs=TRANSLATION_TRITON_OUTPUT_SPECS,
+        runtime_bundle="localize-runtime",
+        runtime_pip_packages=(
+            "torch>=2.6",
+            "transformers>=4.55",
+            "accelerate>=1.10",
+            "sentencepiece>=0.2",
+            "safetensors>=0.5",
+        ),
     ),
     "cosyvoice3_0_5b": ModelSpec(
         model_id="cosyvoice3_0_5b",
         stage="tts",
         hf_repo_id="FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
-        revision="main",
+        revision="5646a54a6bea9eb1ec64b3ded068fdcf5a65f9ae",
         license_name="Apache-2.0",
         approved_for_auto_download=False,
         serve_status=MANUAL_PLANNED_LANE,
@@ -150,17 +191,37 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
     "qwen3_tts_0_6b": ModelSpec(
         model_id="qwen3_tts_0_6b",
         stage="tts",
-        hf_repo_id="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-        revision="main",
+        hf_repo_id="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        revision="22fe0656d05e0d0d2ca5cd129449e3487b043c59",
         license_name="Apache-2.0",
         approved_for_auto_download=False,
         serve_status=MANUAL_PLANNED_LANE,
         repository_model_name=DEFAULT_TTS_REPOSITORY_MODEL_NAME,
-        next_action="Provision the manual Qwen3-TTS Triton repository and validate the preview stage in /api/localize.",
-        notes=TTS_TRITON_NOTES,
+        next_action="Provision the manual Qwen3-TTS CustomVoice Triton repository and validate the preview stage in /api/localize.",
+        notes=(
+            f"{TTS_TRITON_NOTES} The opt-in automated runtime path uses the CustomVoice checkpoint so the "
+            "existing text + language + speaker_prompt API can map speaker_prompt to the model instruction "
+            "without requiring reference audio."
+        ),
+        snapshot_allow_patterns=(
+            "config.json",
+            "generation_config.json",
+            "merges.txt",
+            "model.safetensors",
+            "preprocessor_config.json",
+            "speech_tokenizer/*",
+            "tokenizer_config.json",
+            "vocab.json",
+        ),
         triton_backend=TTS_TRITON_BACKEND,
         triton_inputs=TTS_TRITON_INPUT_SPECS,
         triton_outputs=TTS_TRITON_OUTPUT_SPECS,
+        runtime_bundle="localize-runtime",
+        runtime_pip_packages=(
+            "torch>=2.6",
+            "qwen-tts>=0.1.0",
+            "soundfile>=0.13",
+        ),
     ),
     "bs_roformer": ModelSpec(
         model_id="bs_roformer",

@@ -51,10 +51,18 @@ class ModelCatalogTest(unittest.TestCase):
         self.assertEqual(translation.repository_model_name, "madlad400_3b_mt")
         self.assertEqual(translation.triton_backend, "python")
         self.assertIn("translated_text: BYTES[1] UTF-8 translated text", translation.triton_outputs)
+        self.assertTrue(translation.snapshot_allow_patterns)
+        self.assertEqual(translation.runtime_bundle, "localize-runtime")
+        self.assertIn("transformers>=4.55", translation.runtime_pip_packages)
 
         self.assertEqual(tts.repository_model_name, "qwen3_tts_0_6b")
         self.assertEqual(tts.triton_backend, "python")
         self.assertTrue(any(contract.startswith("audio_pcm: FP32[1, samples]") for contract in tts.triton_outputs))
+        self.assertEqual(tts.hf_repo_id, "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
+        self.assertEqual(tts.runtime_bundle, "localize-runtime")
+        self.assertEqual(tts.revision, "22fe0656d05e0d0d2ca5cd129449e3487b043c59")
+        self.assertIn("qwen-tts>=0.1.0", tts.runtime_pip_packages)
+        self.assertIn("CustomVoice checkpoint", tts.notes)
 
 
 if __name__ == "__main__":

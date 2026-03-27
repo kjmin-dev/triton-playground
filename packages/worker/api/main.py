@@ -35,7 +35,7 @@ app.add_middleware(
 
 
 def _triton_grpc_url() -> str:
-    return os.getenv("TRITON_GRPC_URL", "localhost:8001")
+    return os.getenv("TRITON_GRPC_URL", "localhost:18001")
 
 
 def _model_profile() -> str:

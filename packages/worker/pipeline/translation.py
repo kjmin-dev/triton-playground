@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pipeline.runtime_status import TritonReadiness
+from pipeline.triton import check_readiness
 from pipeline.translation_contract import (
     DEFAULT_TRANSLATION_REPOSITORY_MODEL_NAME,
     SUPPORTED_TRANSLATION_LANGUAGES,
@@ -35,22 +36,6 @@ def normalize_pipeline_language(language: str | None, *, allow_auto: bool) -> st
     return normalized
 
 
-def _model_index_entry_name(entry: object) -> str | None:
-    if isinstance(entry, dict):
-        value = entry.get("name")
-        return str(value) if value is not None else None
-
-    value = getattr(entry, "name", None)
-    return str(value) if value is not None else None
-
-
-def _model_index_entry_state(entry: object) -> str | None:
-    if isinstance(entry, dict):
-        value = entry.get("state")
-        return str(value) if value is not None else None
-
-    value = getattr(entry, "state", None)
-    return str(value) if value is not None else None
 
 
 def _decode_string_output(tensor: np.ndarray | None, *, output_name: str) -> str:
@@ -106,35 +91,7 @@ class TritonTranslationClient:
             raise TritonUnavailableError(f"Failed to create Triton client for {url}: {exc}") from exc
 
     def readiness(self) -> TritonReadiness:
-        try:
-            model_present: bool | None = None
-            model_state: str | None = None
-            get_model_repository_index = getattr(self._client, "get_model_repository_index", None)
-            if callable(get_model_repository_index):
-                try:
-                    model_index = get_model_repository_index()
-                except Exception:
-                    model_index = None
-
-                if model_index is not None:
-                    model_present = False
-                    for entry in model_index:
-                        if _model_index_entry_name(entry) == self._model_name:
-                            model_present = True
-                            model_state = _model_index_entry_state(entry)
-                            break
-
-            return TritonReadiness.from_status(
-                server_url=self._url,
-                server_ready=bool(self._client.is_server_ready()),
-                server_live=bool(self._client.is_server_live()),
-                model_ready=bool(self._client.is_model_ready(self._model_name)),
-                model_present=model_present,
-                model_state=model_state,
-                model_name=self._model_name,
-            )
-        except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
-            raise TritonUnavailableError(f"Failed to query Triton readiness: {exc}") from exc
+        return check_readiness(self._client, self._url, self._model_name)
 
     def translate(
         self,

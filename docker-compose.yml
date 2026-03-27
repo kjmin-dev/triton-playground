@@ -5,13 +5,9 @@ services:
       dockerfile: packages/worker/Dockerfile
     command:
       [
-        "python",
-        "-m",
-        "pipeline.prepare_models",
-        "--profile",
-        "baseline",
-        "--output-root",
-        "/models"
+        "sh",
+        "-lc",
+        "python -m pipeline.prepare_models --profile ${MODEL_PROFILE:-baseline} --output-root /models ${MATERIALIZE_MANUAL_MODELS:+--materialize-manual-models} ${MODEL_PREPARE_FLAGS:-}"
       ]
     environment:
       - HF_HOME=/cache/huggingface
@@ -20,26 +16,23 @@ services:
       - hf-cache:/cache/huggingface
 
   triton:
-    image: nvcr.io/nvidia/tritonserver:24.05-py3
+    build:
+      context: .
+      dockerfile: packages/triton/Dockerfile
+      args:
+        TRITON_RUNTIME_PROFILE: ${TRITON_RUNTIME_PROFILE:-baseline}
     command: >-
       tritonserver
       --model-repository=/models
-      --http-port=${TRITON_HTTP_PORT:-8000}
-      --grpc-port=${TRITON_GRPC_PORT:-8001}
-      --metrics-port=${TRITON_METRICS_PORT:-8002}
+      --http-port=${TRITON_HTTP_PORT:-18000}
+      --grpc-port=${TRITON_GRPC_PORT:-18001}
+      --metrics-port=${TRITON_METRICS_PORT:-18002}
     volumes:
       - ./model_repository:/models
     ports:
-      - "${TRITON_HTTP_PORT:-8000}:${TRITON_HTTP_PORT:-8000}" # HTTP
-      - "${TRITON_GRPC_PORT:-8001}:${TRITON_GRPC_PORT:-8001}" # gRPC
-      - "${TRITON_METRICS_PORT:-8002}:${TRITON_METRICS_PORT:-8002}" # Metrics
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+      - "${TRITON_HTTP_PORT:-18000}:${TRITON_HTTP_PORT:-18000}" # HTTP
+      - "${TRITON_GRPC_PORT:-18001}:${TRITON_GRPC_PORT:-18001}" # gRPC
+      - "${TRITON_METRICS_PORT:-18002}:${TRITON_METRICS_PORT:-18002}" # Metrics
     shm_size: "2g"
     healthcheck:
       test:
@@ -47,16 +40,17 @@ services:
           "CMD",
           "python3",
           "-c",
-          "import os, sys, urllib.request; port = os.getenv('TRITON_HTTP_PORT', '8000'); sys.exit(0 if urllib.request.urlopen(f'http://localhost:{port}/v2/health/ready').status == 200 else 1)"
+          "import os, sys, urllib.request; port = os.getenv('TRITON_HTTP_PORT', '18000'); sys.exit(0 if urllib.request.urlopen(f'http://localhost:{port}/v2/health/ready').status == 200 else 1)"
         ]
       interval: 5s
       timeout: 3s
       retries: 12
       start_period: 10s
     environment:
-      - TRITON_HTTP_PORT=${TRITON_HTTP_PORT:-8000}
-      - TRITON_GRPC_PORT=${TRITON_GRPC_PORT:-8001}
-      - TRITON_METRICS_PORT=${TRITON_METRICS_PORT:-8002}
+      - TRITON_RUNTIME_PROFILE=${TRITON_RUNTIME_PROFILE:-baseline}
+      - TRITON_HTTP_PORT=${TRITON_HTTP_PORT:-18000}
+      - TRITON_GRPC_PORT=${TRITON_GRPC_PORT:-18001}
+      - TRITON_METRICS_PORT=${TRITON_METRICS_PORT:-18002}
     depends_on:
       model-init:
         condition: service_completed_successfully
@@ -68,7 +62,7 @@ services:
     ports:
       - "${WORKER_PORT:-8080}:${WORKER_PORT:-8080}"
     environment:
-      - TRITON_GRPC_URL=triton:${TRITON_GRPC_PORT:-8001}
+      - TRITON_GRPC_URL=triton:${TRITON_GRPC_PORT:-18001}
       - MODEL_PROFILE=${MODEL_PROFILE:-baseline}
       - MODEL_REPOSITORY_ROOT=/models
       - WORKER_PORT=${WORKER_PORT:-8080}
