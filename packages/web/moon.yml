@@ -1,0 +1,9 @@
+language: javascript
+
+tasks:
+  dev:
+    command: bun --bun vite dev
+    options:
+      persistent: true
+  build:
+    command: bun --bun vite build
