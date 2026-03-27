@@ -112,7 +112,7 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         model_id="whisper_large_v3_turbo",
         stage="stt",
         hf_repo_id="openai/whisper-large-v3-turbo",
-        revision="f1baaf0c070fd03fc67d773bebeff75023422b6d",
+        revision="41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
         license_name="MIT",
         approved_for_auto_download=False,
         serve_status=MANUAL_PLANNED_LANE,
@@ -137,7 +137,7 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         triton_outputs=WHISPER_TRITON_OUTPUT_SPECS,
         runtime_bundle="localize-runtime",
         runtime_pip_packages=(
-            "torch>=2.6",
+            "torch>=2.6,<2.7",
             "transformers>=4.55",
             "accelerate>=1.10",
             "tiktoken>=0.9",
@@ -169,7 +169,7 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         triton_outputs=TRANSLATION_TRITON_OUTPUT_SPECS,
         runtime_bundle="localize-runtime",
         runtime_pip_packages=(
-            "torch>=2.6",
+            "torch>=2.6,<2.7",
             "transformers>=4.55",
             "accelerate>=1.10",
             "sentencepiece>=0.2",
@@ -191,17 +191,17 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
     "qwen3_tts_0_6b": ModelSpec(
         model_id="qwen3_tts_0_6b",
         stage="tts",
-        hf_repo_id="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-        revision="22fe0656d05e0d0d2ca5cd129449e3487b043c59",
+        hf_repo_id="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        revision="5d83992436eae1d760afd27aff78a71d676296fc",
         license_name="Apache-2.0",
         approved_for_auto_download=False,
         serve_status=MANUAL_PLANNED_LANE,
         repository_model_name=DEFAULT_TTS_REPOSITORY_MODEL_NAME,
-        next_action="Provision the manual Qwen3-TTS CustomVoice Triton repository and validate the preview stage in /api/localize.",
+        next_action="Validate voice cloning quality in /api/localize with reference audio from STT segments.",
         notes=(
-            f"{TTS_TRITON_NOTES} The opt-in automated runtime path uses the CustomVoice checkpoint so the "
-            "existing text + language + speaker_prompt API can map speaker_prompt to the model instruction "
-            "without requiring reference audio."
+            f"{TTS_TRITON_NOTES} The Base checkpoint supports voice cloning via generate_voice_clone with "
+            "reference audio extracted from STT segments. Falls back to predefined speakers when no "
+            "reference audio is provided."
         ),
         snapshot_allow_patterns=(
             "config.json",
@@ -218,7 +218,7 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         triton_outputs=TTS_TRITON_OUTPUT_SPECS,
         runtime_bundle="localize-runtime",
         runtime_pip_packages=(
-            "torch>=2.6",
+            "torch>=2.6,<2.7",
             "qwen-tts>=0.1.0",
             "soundfile>=0.13",
         ),
