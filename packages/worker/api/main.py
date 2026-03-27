@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import functools
+import logging
 import os
 from pathlib import Path
+from typing import TypeVar
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -24,6 +29,8 @@ from pipeline.tts import TritonTtsClient, encode_wav_preview, validate_tts_langu
 from pipeline.tts_contract import DEFAULT_TTS_MODEL_ID
 from pipeline.vad import analyze_vad
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Triton Playground Worker")
 
 app.add_middleware(
@@ -32,6 +39,44 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+T = TypeVar("T")
+
+
+class ClientDisconnectedError(Exception):
+    pass
+
+
+async def _run_cancellable(request: Request, fn, *args, **kwargs) -> T:
+    """Run a blocking function in a thread pool. Abort if the client disconnects.
+
+    This keeps the event loop free so lightweight endpoints like /api/ready
+    remain responsive while heavy GPU work is in progress.
+    """
+    work = asyncio.get_event_loop().run_in_executor(None, functools.partial(fn, *args, **kwargs))
+
+    async def _poll_disconnect():
+        while not await request.is_disconnected():
+            await asyncio.sleep(0.5)
+
+    work_task = asyncio.ensure_future(work)
+    disconnect_task = asyncio.ensure_future(_poll_disconnect())
+
+    done, pending = await asyncio.wait(
+        {work_task, disconnect_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    for p in pending:
+        p.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await p
+
+    if disconnect_task in done:
+        logger.info("Client disconnected, aborting request")
+        raise ClientDisconnectedError()
+
+    return work_task.result()
 
 
 def _triton_grpc_url() -> str:
@@ -83,30 +128,37 @@ async def models():
 
 @app.get("/api/ready")
 async def ready():
+    """Lightweight readiness probe — runs in the event loop, never blocked by GPU work."""
+    readiness = await asyncio.to_thread(
+        lambda: _check_readiness(),
+    )
+    return readiness
+
+
+def _check_readiness():
     repository_status = inspect_model_repository(
         repository_root=_model_repository_root(),
         model_name="silero_vad",
     )
 
     try:
-        readiness = TritonVadClient(url=_triton_grpc_url()).readiness()
+        triton_readiness = TritonVadClient(url=_triton_grpc_url()).readiness()
     except TritonUnavailableError as exc:
-        readiness = TritonReadiness.from_error(
+        triton_readiness = TritonReadiness.from_error(
             server_url=_triton_grpc_url(),
             model_name="silero_vad",
             issue=str(exc),
         )
-        payload = build_ready_payload(_model_profile(), readiness)
-        payload["repository"] = repository_status.to_dict()
-        return JSONResponse(status_code=503, content=payload)
 
-    payload = build_ready_payload(_model_profile(), readiness)
+    payload = build_ready_payload(_model_profile(), triton_readiness)
     payload["repository"] = repository_status.to_dict()
-    return JSONResponse(status_code=200 if readiness.ready else 503, content=payload)
+    status_code = 200 if triton_readiness.ready else 503
+    return JSONResponse(status_code=status_code, content=payload)
 
 
 @app.post("/api/tts")
 async def tts(
+    request: Request,
     text: str = Query(..., min_length=1, max_length=5000),
     language: str = Query(...),
     prompt: str | None = Query(None, max_length=200),
@@ -114,7 +166,7 @@ async def tts(
 ):
     model_spec = _get_stage_model_spec(model, "tts")
 
-    try:
+    def _work():
         normalized_language = validate_tts_language(language)
         synthesized = TritonTtsClient(
             url=_triton_grpc_url(),
@@ -124,6 +176,12 @@ async def tts(
             language=normalized_language,
             speaker_prompt=prompt,
         )
+        return normalized_language, synthesized
+
+    try:
+        normalized_language, synthesized = await _run_cancellable(request, _work)
+    except ClientDisconnectedError:
+        return JSONResponse(status_code=499, content={"detail": "Client disconnected"})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TritonUnavailableError as exc:
@@ -144,6 +202,7 @@ async def tts(
 
 @app.post("/api/stt")
 async def stt(
+    request: Request,
     file: UploadFile = File(...),
     threshold: float = Query(0.5, ge=0.1, le=0.99),
     language: str | None = Query(None),
@@ -159,10 +218,10 @@ async def stt(
         raise HTTPException(status_code=400, detail="uploaded file is empty")
 
     model_spec = _get_stage_model_spec(model, "stt")
+    audio = resample_audio(decode_wav(blob), target_sample_rate=16000)
 
-    try:
-        audio = resample_audio(decode_wav(blob), target_sample_rate=16000)
-        analysis = analyze_stt(
+    def _work():
+        return analyze_stt(
             audio=audio,
             vad_client=TritonVadClient(url=_triton_grpc_url()),
             stt_client=TritonWhisperClient(
@@ -174,6 +233,11 @@ async def stt(
             task=task,
             prompt=prompt,
         )
+
+    try:
+        analysis = await _run_cancellable(request, _work)
+    except ClientDisconnectedError:
+        return JSONResponse(status_code=499, content={"detail": "Client disconnected"})
     except UnsupportedAudioError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
@@ -199,6 +263,7 @@ async def stt(
 
 @app.post("/api/localize")
 async def localize(
+    request: Request,
     file: UploadFile = File(...),
     threshold: float = Query(0.5, ge=0.1, le=0.99),
     source_language: str | None = Query(None),
@@ -220,9 +285,10 @@ async def localize(
     translation_spec = _get_stage_model_spec(translation_model, "translation")
     tts_spec = _get_stage_model_spec(tts_model, "tts")
 
-    try:
-        audio = resample_audio(decode_wav(blob), target_sample_rate=16000)
-        payload = localize_audio(
+    audio = resample_audio(decode_wav(blob), target_sample_rate=16000)
+
+    def _work():
+        return localize_audio(
             audio=audio,
             threshold=threshold,
             source_language=source_language,
@@ -246,6 +312,11 @@ async def localize(
                 model_name=tts_spec.repository_model_name,
             ),
         )
+
+    try:
+        payload = await _run_cancellable(request, _work)
+    except ClientDisconnectedError:
+        return JSONResponse(status_code=499, content={"detail": "Client disconnected"})
     except UnsupportedAudioError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
@@ -278,6 +349,7 @@ async def separate(file: UploadFile):
 
 @app.post("/api/vad")
 async def vad(
+    request: Request,
     file: UploadFile = File(...),
     threshold: float = Query(0.5, ge=0.1, le=0.99),
 ):
@@ -288,9 +360,15 @@ async def vad(
     if not blob:
         raise HTTPException(status_code=400, detail="uploaded file is empty")
 
+    audio = resample_audio(decode_wav(blob), target_sample_rate=16000)
+
+    def _work():
+        return analyze_vad(audio=audio, client=TritonVadClient(url=_triton_grpc_url()), threshold=threshold)
+
     try:
-        audio = resample_audio(decode_wav(blob), target_sample_rate=16000)
-        analysis = analyze_vad(audio=audio, client=TritonVadClient(url=_triton_grpc_url()), threshold=threshold)
+        analysis = await _run_cancellable(request, _work)
+    except ClientDisconnectedError:
+        return JSONResponse(status_code=499, content={"detail": "Client disconnected"})
     except UnsupportedAudioError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TritonUnavailableError as exc:
