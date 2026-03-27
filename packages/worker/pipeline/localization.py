@@ -38,9 +38,7 @@ def _select_reference_segment(
     Returns (samples, text, sample_rate) or None.
     """
     candidates = [
-        seg for seg in segments
-        if seg.text.strip()
-        and _REF_MIN_DURATION_MS <= seg.duration_ms <= _REF_MAX_DURATION_MS
+        seg for seg in segments if seg.text.strip() and _REF_MIN_DURATION_MS <= seg.duration_ms <= _REF_MAX_DURATION_MS
     ]
     if not candidates:
         candidates = [seg for seg in segments if seg.text.strip() and seg.duration_ms >= 500]
@@ -227,7 +225,8 @@ def localize_audio(
     if ref is not None:
         logger.info(
             "Voice cloning: selected %.1fs reference segment (prob=%.2f)",
-            len(ref[0]) / ref[2], max((s.average_probability for s in stt_analysis.segments if s.text == ref[1]), default=0),
+            len(ref[0]) / ref[2],
+            max((s.average_probability for s in stt_analysis.segments if s.text == ref[1]), default=0),
         )
 
     t0 = time.monotonic()

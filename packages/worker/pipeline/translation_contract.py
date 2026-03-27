@@ -17,9 +17,7 @@ TRANSLATION_TRITON_INPUT_SPECS = (
     f"{TRANSLATION_TARGET_LANGUAGE_INPUT}: STRING[1] required target language code",
 )
 
-TRANSLATION_TRITON_OUTPUT_SPECS = (
-    f"{TRANSLATION_TEXT_OUTPUT}: STRING[1] UTF-8 translated text",
-)
+TRANSLATION_TRITON_OUTPUT_SPECS = (f"{TRANSLATION_TEXT_OUTPUT}: STRING[1] UTF-8 translated text",)
 
 TRANSLATION_TRITON_NOTES = (
     "Manual Triton Python backend for the first localization pair. The worker passes the aggregated Whisper transcript "

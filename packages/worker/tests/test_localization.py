@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -35,8 +35,13 @@ class LocalizationPipelineTest(unittest.TestCase):
 
         class FakeTtsClient:
             def synthesize(
-                self, text: str, *, language: str, speaker_prompt: str | None = None,
-                ref_audio: np.ndarray | None = None, ref_audio_sample_rate: int = 16000,
+                self,
+                text: str,
+                *,
+                language: str,
+                speaker_prompt: str | None = None,
+                ref_audio: np.ndarray | None = None,
+                ref_audio_sample_rate: int = 16000,
                 ref_text: str | None = None,
             ) -> SynthesizedAudio:
                 self.call = (text, language, speaker_prompt)

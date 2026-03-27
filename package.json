@@ -14,14 +14,16 @@
     "prepare:localize": "moon run worker:prepare-localize",
     "download:weights": "bash scripts/download-weights.sh",
     "prepare:manual-stubs": "moon run worker:prepare-manual-stubs",
-    "lint": "moon run :lint",
+    "lint": "moon run :lint web:typecheck",
     "format": "moon run :format",
-    "test:worker": "moon run worker:test",
-    "check": "moon run web:build worker:compile worker:test"
+    "test": "moon run worker:test",
+    "check": "moon run worker:lint worker:format-check worker:test web:lint web:typecheck web:build"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.9",
     "@moonrepo/cli": "^2.1.3",
-    "@types/bun": "^1.3.11"
+    "@types/bun": "^1.3.11",
+    "lefthook": "^2.1.4"
   },
   "workspaces": [
     "packages/*"

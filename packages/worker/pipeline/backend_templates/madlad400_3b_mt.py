@@ -5,7 +5,6 @@ from pathlib import Path
 import numpy as np
 import triton_python_backend_utils as pb_utils
 
-
 TARGET_PREFIX = {
     "en": "<2en>",
     "ja": "<2ja>",
@@ -65,9 +64,7 @@ class TritonPythonModel:
 
             prefix = TARGET_PREFIX.get(target_language)
             if prefix is None:
-                raise pb_utils.TritonModelException(
-                    f"unsupported translation target language: {target_language}"
-                )
+                raise pb_utils.TritonModelException(f"unsupported translation target language: {target_language}")
 
             encoded = self._tokenizer(
                 f"{prefix} {text}",

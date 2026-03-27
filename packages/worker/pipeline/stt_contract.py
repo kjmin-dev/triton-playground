@@ -22,9 +22,7 @@ WHISPER_TRITON_INPUT_SPECS = (
     f"{WHISPER_PROMPT_INPUT}: STRING[1] optional prompt; empty string means no prompt",
 )
 
-WHISPER_TRITON_OUTPUT_SPECS = (
-    f"{WHISPER_TRANSCRIPT_OUTPUT}: STRING[1] UTF-8 transcript for the supplied segment",
-)
+WHISPER_TRITON_OUTPUT_SPECS = (f"{WHISPER_TRANSCRIPT_OUTPUT}: STRING[1] UTF-8 transcript for the supplied segment",)
 
 WHISPER_TRITON_NOTES = (
     "Manual Triton Python backend. The worker runs Silero VAD first, then sends each detected speech "

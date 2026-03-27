@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import io
 import wave
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -54,14 +54,10 @@ def decode_wav(blob: bytes) -> AudioBuffer:
         raise UnsupportedAudioError(f"Could not decode WAV container: {exc}") from exc
 
     if compression_type != "NONE":
-        raise UnsupportedAudioError(
-            f"Only uncompressed PCM WAV files are supported, not {compression_name!s}."
-        )
+        raise UnsupportedAudioError(f"Only uncompressed PCM WAV files are supported, not {compression_name!s}.")
 
     if sample_width not in SUPPORTED_SAMPLE_WIDTHS:
-        raise UnsupportedAudioError(
-            "Only 8-bit, 16-bit, and 32-bit PCM WAV files are supported."
-        )
+        raise UnsupportedAudioError("Only 8-bit, 16-bit, and 32-bit PCM WAV files are supported.")
 
     if channels < 1:
         raise UnsupportedAudioError("Audio file must contain at least one channel.")
@@ -91,9 +87,7 @@ def decode_wav(blob: bytes) -> AudioBuffer:
 
     if channels > 1:
         if samples.size % channels != 0:
-            raise UnsupportedAudioError(
-                "Audio file has a malformed channel layout and cannot be reshaped."
-            )
+            raise UnsupportedAudioError("Audio file has a malformed channel layout and cannot be reshaped.")
         samples = samples.reshape(-1, channels).mean(axis=1)
 
     normalized = _normalize_pcm(samples, sample_width)

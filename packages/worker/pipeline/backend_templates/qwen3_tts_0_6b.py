@@ -5,7 +5,6 @@ from pathlib import Path
 import numpy as np
 import triton_python_backend_utils as pb_utils
 
-
 LANGUAGE_NAMES = {
     "en": "English",
     "ja": "Japanese",

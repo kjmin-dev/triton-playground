@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -65,6 +65,7 @@ class TritonReadinessTest(unittest.TestCase):
             def get_model_repository_index(self):
                 class _Resp:
                     models = [{"name": "other_model", "state": "READY"}]
+
                 return _Resp()
 
         client = object.__new__(TritonVadClient)

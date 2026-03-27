@@ -6,7 +6,6 @@ import numpy as np
 
 from pipeline.audio import AudioBuffer
 from pipeline.runtime_status import TritonReadiness
-from pipeline.triton import check_readiness
 from pipeline.stt_contract import (
     DEFAULT_WHISPER_REPOSITORY_MODEL_NAME,
     SUPPORTED_WHISPER_LANGUAGES,
@@ -18,7 +17,7 @@ from pipeline.stt_contract import (
     WHISPER_TASK_INPUT,
     WHISPER_TRANSCRIPT_OUTPUT,
 )
-from pipeline.triton import TritonUnavailableError, describe_triton_error
+from pipeline.triton import TritonUnavailableError, check_readiness, describe_triton_error
 from pipeline.vad import analyze_vad
 
 
@@ -75,8 +74,6 @@ def validate_whisper_task(task: str) -> str:
         raise ValueError(f"task must be one of: {supported}")
 
     return normalized
-
-
 
 
 def _slice_audio(audio: AudioBuffer, start_ms: int, end_ms: int) -> AudioBuffer:

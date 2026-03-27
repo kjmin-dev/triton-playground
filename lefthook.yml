@@ -1,0 +1,27 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: python-lint
+      root: packages/worker/
+      glob: "**/*.py"
+      run: .venv/bin/ruff check {staged_files}
+    - name: python-format
+      root: packages/worker/
+      glob: "**/*.py"
+      run: .venv/bin/ruff format --check {staged_files}
+    - name: web-lint
+      glob: "packages/web/src/**/*.{ts,tsx}"
+      run: bunx biome check {staged_files}
+
+pre-push:
+  parallel: true
+  jobs:
+    - name: python-test
+      root: packages/worker/
+      run: PYTHONPATH=. .venv/bin/python -m pytest tests/ -q
+    - name: web-typecheck
+      root: packages/web/
+      run: bunx tsc --noEmit
+    - name: web-build
+      root: packages/web/
+      run: bun --bun vite build

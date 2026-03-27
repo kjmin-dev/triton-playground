@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pipeline.prepare_models as prepare_models_module
 from pipeline.prepare_models import prepare_model_repository, write_manifest
-
 
 SILERO_SHA256 = "a4a068cd6cf1ea8355b84327595838ca748ec29a25bc91fc82e6c299ccdc5808"
 
@@ -90,7 +89,7 @@ class PrepareModelsTest(unittest.TestCase):
                 manual_stub_root=temp_root / "manual_model_stubs",
             )
 
-            self.assertEqual(manifest["manual_stub_root"], str((temp_root / "manual_model_stubs")))
+            self.assertEqual(manifest["manual_stub_root"], str(temp_root / "manual_model_stubs"))
             records = {record["model_id"]: record for record in manifest["models"]}
 
             whisper = records["whisper_large_v3_turbo"]
@@ -141,12 +140,11 @@ class PrepareModelsTest(unittest.TestCase):
                 )
 
             records = {record["model_id"]: record for record in manifest["models"]}
-            self.assertTrue(manifest["materialize_manual_models"])
             self.assertEqual(records["whisper_large_v3_turbo"]["materialization_mode"], "opt_in_manual_prepare")
             self.assertTrue(records["madlad400_3b_mt"]["installed"])
             self.assertIn("config.pbtxt", records["qwen3_tts_0_6b"]["runtime_files"][0])
 
-    def test_materialize_manual_models_uses_runtime_materializer(self) -> None:
+    def test_materialize_manual_models_captures_model_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             captured: list[str] = []

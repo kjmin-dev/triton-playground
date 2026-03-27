@@ -3,10 +3,10 @@ from __future__ import annotations
 import io
 import struct
 import sys
-from pathlib import Path
 import unittest
-from unittest.mock import patch
 import wave
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 

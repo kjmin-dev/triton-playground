@@ -6,14 +6,15 @@ import json
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from textwrap import dedent
-from typing import Callable
-from urllib.parse import quote
 from urllib.error import URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from pipeline.manual_runtime import materialize_manual_runtime_model
 from pipeline.model_catalog import (
     AUTO_DOWNLOAD_LANE,
     HOLD_LANE,
@@ -23,11 +24,12 @@ from pipeline.model_catalog import (
     get_model_spec,
     get_profile_model_ids,
 )
-from pipeline.manual_runtime import materialize_manual_runtime_model
 
 DownloadFn = Callable[[ModelSpec, ModelArtifact, Path | None], Path]
 MANIFEST_SCHEMA_VERSION = 2
-_TRITON_TENSOR_SPEC_RE = re.compile(r"^(?P<name>[^:]+): (?P<dtype>[A-Z0-9]+)\[(?P<dims>[^\]]+)\](?: (?P<description>.*))?$")
+_TRITON_TENSOR_SPEC_RE = re.compile(
+    r"^(?P<name>[^:]+): (?P<dtype>[A-Z0-9]+)\[(?P<dims>[^\]]+)\](?: (?P<description>.*))?$"
+)
 
 
 class ModelPreparationError(RuntimeError):
@@ -77,9 +79,7 @@ def _verify_sha256(path: Path, expected_sha256: str | None) -> None:
 
     actual = _sha256_for(path)
     if actual != expected_sha256:
-        raise ModelPreparationError(
-            f"SHA256 mismatch for {path.name}: expected {expected_sha256}, got {actual}"
-        )
+        raise ModelPreparationError(f"SHA256 mismatch for {path.name}: expected {expected_sha256}, got {actual}")
 
 
 def _skip_reason(spec: ModelSpec) -> str:
@@ -149,13 +149,7 @@ def _render_pbtxt_tensor_block(kind: str, entry: str) -> str:
     dim_str = ", ".join(str(d) for d in dims)
     comment = f"# {description}\n" if description else ""
     return (
-        f"{comment}{kind} [\n"
-        "  {\n"
-        f'    name: "{name}"\n'
-        f"    data_type: TYPE_{dtype}\n"
-        f"    dims: [ {dim_str} ]\n"
-        "  }\n"
-        "]\n"
+        f'{comment}{kind} [\n  {{\n    name: "{name}"\n    data_type: TYPE_{dtype}\n    dims: [ {dim_str} ]\n  }}\n]\n'
     )
 
 

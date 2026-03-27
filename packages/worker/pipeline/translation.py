@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import numpy as np
+
 from pipeline.runtime_status import TritonReadiness
-from pipeline.triton import check_readiness
 from pipeline.translation_contract import (
     DEFAULT_TRANSLATION_REPOSITORY_MODEL_NAME,
     SUPPORTED_TRANSLATION_LANGUAGES,
@@ -10,9 +11,7 @@ from pipeline.translation_contract import (
     TRANSLATION_TEXT_INPUT,
     TRANSLATION_TEXT_OUTPUT,
 )
-from pipeline.triton import TritonUnavailableError
-
-import numpy as np
+from pipeline.triton import TritonUnavailableError, check_readiness
 
 
 def normalize_pipeline_language(language: str | None, *, allow_auto: bool) -> str | None:
@@ -30,12 +29,14 @@ def normalize_pipeline_language(language: str | None, *, allow_auto: bool) -> st
         raise ValueError(f"language must be one of: {supported}")
 
     if normalized not in SUPPORTED_TRANSLATION_LANGUAGES:
-        supported = ", ".join(("auto", *SUPPORTED_TRANSLATION_LANGUAGES)) if allow_auto else ", ".join(SUPPORTED_TRANSLATION_LANGUAGES)
+        supported = (
+            ", ".join(("auto", *SUPPORTED_TRANSLATION_LANGUAGES))
+            if allow_auto
+            else ", ".join(SUPPORTED_TRANSLATION_LANGUAGES)
+        )
         raise ValueError(f"language must be one of: {supported}")
 
     return normalized
-
-
 
 
 def _decode_string_output(tensor: np.ndarray | None, *, output_name: str) -> str:

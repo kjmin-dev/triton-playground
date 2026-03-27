@@ -22,7 +22,6 @@ from rich.progress import (
     DownloadColumn,
     Progress,
     SpinnerColumn,
-    TaskProgressColumn,
     TextColumn,
     TimeRemainingColumn,
     TransferSpeedColumn,
@@ -167,10 +166,7 @@ def download_weights(
     resolved_cache = cache_dir or Path(".cache/huggingface")
     resolved_cache.mkdir(parents=True, exist_ok=True)
 
-    actionable = [
-        s for s in specs
-        if s.snapshot_allow_patterns and s.hf_repo_id and s.revision
-    ]
+    actionable = [s for s in specs if s.snapshot_allow_patterns and s.hf_repo_id and s.revision]
     skipped = [s for s in specs if s not in actionable]
 
     total = len(actionable)
@@ -205,12 +201,14 @@ def download_weights(
 
         _console.print(f"  {counter} [green]✓[/green] [bold]{spec.model_id}[/bold]  {repo_label}")
 
-        results.append({
-            "model_id": spec.model_id,
-            "hf_repo_id": spec.hf_repo_id or "",
-            "revision": spec.revision or "",
-            "snapshot_path": str(snapshot_path),
-        })
+        results.append(
+            {
+                "model_id": spec.model_id,
+                "hf_repo_id": spec.hf_repo_id or "",
+                "revision": spec.revision or "",
+                "snapshot_path": str(snapshot_path),
+            }
+        )
 
     _console.print()
     ok = len(results)
@@ -219,7 +217,7 @@ def download_weights(
     elif ok:
         _console.print(f"  [yellow]✓ {ok}/{total} models ready[/yellow]")
     else:
-        _console.print(f"  [red]✗ no models downloaded[/red]")
+        _console.print("  [red]✗ no models downloaded[/red]")
     _console.print()
 
     return results

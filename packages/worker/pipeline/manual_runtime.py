@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import shutil
-from pathlib import Path
 import re
+from pathlib import Path
 from textwrap import dedent
 
 from pipeline.model_catalog import ModelSpec
 
-
 _BACKEND_TEMPLATE_ROOT = Path(__file__).resolve().parent / "backend_templates"
-_TRITON_TENSOR_SPEC_RE = re.compile(r"^(?P<name>[^:]+): (?P<dtype>[A-Z0-9]+)\[(?P<dims>[^\]]+)\](?: (?P<description>.*))?$")
+_TRITON_TENSOR_SPEC_RE = re.compile(
+    r"^(?P<name>[^:]+): (?P<dtype>[A-Z0-9]+)\[(?P<dims>[^\]]+)\](?: (?P<description>.*))?$"
+)
 
 
 def _parse_triton_tensor_spec(entry: str) -> tuple[str, str, list[int], str]:
@@ -17,10 +17,7 @@ def _parse_triton_tensor_spec(entry: str) -> tuple[str, str, list[int], str]:
     if match is None:
         raise RuntimeError(f"Could not parse Triton tensor contract entry: {entry}")
 
-    dims = [
-        int(dim.strip()) if dim.strip().lstrip("-").isdigit() else -1
-        for dim in match.group("dims").split(",")
-    ]
+    dims = [int(dim.strip()) if dim.strip().lstrip("-").isdigit() else -1 for dim in match.group("dims").split(",")]
     return (
         match.group("name").strip(),
         match.group("dtype").strip(),
@@ -34,13 +31,7 @@ def _render_pbtxt_tensor_block(kind: str, entry: str) -> str:
     dim_str = ", ".join(str(d) for d in dims)
     comment = f"# {description}\n" if description else ""
     return (
-        f"{comment}{kind} [\n"
-        "  {\n"
-        f'    name: "{name}"\n'
-        f"    data_type: TYPE_{dtype}\n"
-        f"    dims: [ {dim_str} ]\n"
-        "  }\n"
-        "]\n"
+        f'{comment}{kind} [\n  {{\n    name: "{name}"\n    data_type: TYPE_{dtype}\n    dims: [ {dim_str} ]\n  }}\n]\n'
     )
 
 

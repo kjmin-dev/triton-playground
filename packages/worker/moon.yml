@@ -25,5 +25,9 @@ tasks:
       cache: false
   format:
     command: .venv/bin/ruff format .
+  format-check:
+    command: .venv/bin/ruff format --check .
+    options:
+      cache: false
   test:
-    command: .venv/bin/python -m unittest discover -s tests
+    command: PYTHONPATH=. .venv/bin/python -m pytest tests/ -q

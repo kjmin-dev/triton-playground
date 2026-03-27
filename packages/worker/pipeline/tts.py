@@ -8,9 +8,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from pipeline.runtime_status import TritonReadiness
-from pipeline.triton import check_readiness
 from pipeline.translation import normalize_pipeline_language
-from pipeline.triton import TritonUnavailableError
+from pipeline.triton import TritonUnavailableError, check_readiness
 from pipeline.tts_contract import (
     DEFAULT_TTS_REPOSITORY_MODEL_NAME,
     TTS_AUDIO_OUTPUT,
@@ -33,8 +32,6 @@ class SynthesizedAudio:
         if self.sample_rate <= 0:
             return 0
         return int(round(len(self.samples) * 1000 / self.sample_rate))
-
-
 
 
 def encode_wav_preview(audio: SynthesizedAudio) -> str:
@@ -116,7 +113,9 @@ class TritonTtsClient:
             else:
                 ref_audio_data = np.zeros((1, 1), dtype=np.float32)
             ref_audio_input = self._grpcclient.InferInput(
-                self._ref_audio_input_name, list(ref_audio_data.shape), "FP32",
+                self._ref_audio_input_name,
+                list(ref_audio_data.shape),
+                "FP32",
             )
             ref_audio_input.set_data_from_numpy(ref_audio_data)
 

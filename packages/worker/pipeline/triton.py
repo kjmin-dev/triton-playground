@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -76,9 +76,7 @@ class ModelRepositoryStatus:
             return "Repository diagnostics are disabled because MODEL_REPOSITORY_ROOT is not set."
 
         if self.ready:
-            return (
-                f"Model repository at {self.root_path} contains a manifest and artifact for {self.model_name}."
-            )
+            return f"Model repository at {self.root_path} contains a manifest and artifact for {self.model_name}."
 
         return " ".join(self.issues)
 
@@ -120,7 +118,7 @@ def _model_index_entry_state(entry: object) -> str | None:
     return str(value) if value is not None else None
 
 
-def check_readiness(client: object, url: str, model_name: str) -> "TritonReadiness":
+def check_readiness(client: object, url: str, model_name: str) -> TritonReadiness:
     """Shared readiness check used by all Triton client classes."""
     try:
         model_present: bool | None = None
@@ -227,11 +225,7 @@ def inspect_model_repository(
             model_records = manifest.get("models", [])
             if isinstance(model_records, list):
                 record = next(
-                    (
-                        item
-                        for item in model_records
-                        if isinstance(item, dict) and item.get("model_id") == model_name
-                    ),
+                    (item for item in model_records if isinstance(item, dict) and item.get("model_id") == model_name),
                     None,
                 )
                 if record is None:
@@ -282,7 +276,7 @@ class TritonVadClient:
     def readiness(self) -> TritonReadiness:
         return check_readiness(self._client, self._url, self._model_name)
 
-    def score_windows(self, windows: "np.ndarray") -> list[float]:
+    def score_windows(self, windows: np.ndarray) -> list[float]:
         readiness = self.readiness()
         if not readiness.ready:
             raise TritonUnavailableError(readiness.summary)

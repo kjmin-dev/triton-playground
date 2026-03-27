@@ -8,3 +8,13 @@ tasks:
       persistent: true
   build:
     command: bun --bun vite build
+  lint:
+    command: bunx biome check --config-path=../../biome.json src/
+    options:
+      cache: false
+  format:
+    command: bunx biome check --fix --config-path=../../biome.json src/
+  typecheck:
+    command: bunx tsc --noEmit
+    options:
+      cache: false

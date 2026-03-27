@@ -40,7 +40,7 @@ class TritonReadiness:
         model_present: bool | None = None,
         model_state: str | None = None,
         model_name: str,
-    ) -> "TritonReadiness":
+    ) -> TritonReadiness:
         issues: list[str] = []
 
         if not server_live:
@@ -80,7 +80,7 @@ class TritonReadiness:
         )
 
     @classmethod
-    def from_error(cls, *, server_url: str, model_name: str, issue: str) -> "TritonReadiness":
+    def from_error(cls, *, server_url: str, model_name: str, issue: str) -> TritonReadiness:
         return cls(
             server_url=server_url,
             server_ready=False,

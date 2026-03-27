@@ -24,7 +24,6 @@ from pipeline.tts_contract import (
     TTS_TRITON_OUTPUT_SPECS,
 )
 
-
 AUTO_DOWNLOAD_LANE = "auto-download + auto-serve"
 MANUAL_PLANNED_LANE = "manual-download + planned-serve"
 HOLD_LANE = "hold"
@@ -62,7 +61,9 @@ class ModelSpec:
         if self.serve_status not in VALID_SERVE_STATUSES:
             raise ValueError(f"Unknown serve status for {self.model_id}: {self.serve_status}")
 
-        if (self.triton_backend is not None or self.triton_inputs or self.triton_outputs) and self.repository_model_name is None:
+        if (
+            self.triton_backend is not None or self.triton_inputs or self.triton_outputs
+        ) and self.repository_model_name is None:
             raise ValueError(f"{self.model_id} declares a Triton contract but no repository model name")
 
         if self.serve_status == AUTO_DOWNLOAD_LANE:
