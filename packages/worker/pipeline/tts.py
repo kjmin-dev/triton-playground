@@ -15,6 +15,8 @@ from pipeline.tts_contract import (
     DEFAULT_TTS_REPOSITORY_MODEL_NAME,
     TTS_AUDIO_OUTPUT,
     TTS_LANGUAGE_INPUT,
+    TTS_REF_AUDIO_INPUT,
+    TTS_REF_TEXT_INPUT,
     TTS_SAMPLE_RATE_OUTPUT,
     TTS_SPEAKER_PROMPT_INPUT,
     TTS_TEXT_INPUT,
@@ -72,6 +74,8 @@ class TritonTtsClient:
         self._text_input_name = text_input_name
         self._language_input_name = language_input_name
         self._speaker_prompt_input_name = speaker_prompt_input_name
+        self._ref_audio_input_name = TTS_REF_AUDIO_INPUT
+        self._ref_text_input_name = TTS_REF_TEXT_INPUT
         self._audio_output_name = audio_output_name
         self._sample_rate_output_name = sample_rate_output_name
 
@@ -89,6 +93,9 @@ class TritonTtsClient:
         *,
         language: str,
         speaker_prompt: str | None = None,
+        ref_audio: np.ndarray | None = None,
+        ref_audio_sample_rate: int = 16000,
+        ref_text: str | None = None,
     ) -> SynthesizedAudio:
         readiness = self.readiness()
         if not readiness.ready:
@@ -104,9 +111,21 @@ class TritonTtsClient:
             speaker_prompt_input = self._grpcclient.InferInput(self._speaker_prompt_input_name, [1], "BYTES")
             speaker_prompt_input.set_data_from_numpy(np.asarray([speaker_prompt or ""], dtype=object))
 
+            if ref_audio is not None and ref_audio.size > 1:
+                ref_audio_data = ref_audio.astype(np.float32).reshape(1, -1)
+            else:
+                ref_audio_data = np.zeros((1, 1), dtype=np.float32)
+            ref_audio_input = self._grpcclient.InferInput(
+                self._ref_audio_input_name, list(ref_audio_data.shape), "FP32",
+            )
+            ref_audio_input.set_data_from_numpy(ref_audio_data)
+
+            ref_text_input = self._grpcclient.InferInput(self._ref_text_input_name, [1], "BYTES")
+            ref_text_input.set_data_from_numpy(np.asarray([ref_text or ""], dtype=object))
+
             result = self._client.infer(
                 self._model_name,
-                [text_input, language_input, speaker_prompt_input],
+                [text_input, language_input, speaker_prompt_input, ref_audio_input, ref_text_input],
                 outputs=[
                     self._grpcclient.InferRequestedOutput(self._audio_output_name),
                     self._grpcclient.InferRequestedOutput(self._sample_rate_output_name),

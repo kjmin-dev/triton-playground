@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 
+import numpy as np
+
 from pipeline.audio import AudioBuffer
-from pipeline.stt import SttAnalysis, analyze_stt
+from pipeline.stt import SttAnalysis, TranscribedSegment, _slice_audio, analyze_stt
 from pipeline.translation import TritonTranslationClient, normalize_pipeline_language
 from pipeline.tts import TritonTtsClient, encode_wav_preview, validate_tts_language
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -17,6 +23,33 @@ class LocalizationStageError(RuntimeError):
     def __str__(self) -> str:
         message = self.payload.get("message")
         return str(message) if isinstance(message, str) else f"{self.stage} stage failed"
+
+
+_REF_MIN_DURATION_MS = 2000
+_REF_MAX_DURATION_MS = 10000
+
+
+def _select_reference_segment(
+    audio: AudioBuffer,
+    segments: list[TranscribedSegment],
+) -> tuple[np.ndarray, str, int] | None:
+    """Pick the best VAD segment for voice cloning reference.
+
+    Returns (samples, text, sample_rate) or None.
+    """
+    candidates = [
+        seg for seg in segments
+        if seg.text.strip()
+        and _REF_MIN_DURATION_MS <= seg.duration_ms <= _REF_MAX_DURATION_MS
+    ]
+    if not candidates:
+        candidates = [seg for seg in segments if seg.text.strip() and seg.duration_ms >= 500]
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda s: s.average_probability)
+    ref_buf = _slice_audio(audio, best.start_ms, best.end_ms)
+    return (ref_buf.samples, best.text, ref_buf.sample_rate)
 
 
 def _build_base_payload(
@@ -70,7 +103,10 @@ def localize_audio(
         tts_model=tts_model,
     )
 
+    t0_pipeline = time.monotonic()
+
     stt_analysis: SttAnalysis
+    t0 = time.monotonic()
     try:
         stt_analysis = analyze_stt(
             audio=audio,
@@ -98,20 +134,35 @@ def localize_audio(
             },
         ) from exc
 
+    stt_elapsed_ms = round((time.monotonic() - t0) * 1000)
+    logger.info("STT completed in %d ms (%d segments)", stt_elapsed_ms, len(stt_analysis.segments))
+
+    stt_warnings: list[str] = []
+    if normalized_source_language is None:
+        stt_warnings.append(
+            "source_language is auto; Whisper may hallucinate non-target text. "
+            "Set source_language explicitly (ko, en, ja, zh) for better accuracy."
+        )
+
+    stt_stage: dict[str, object] = {
+        "status": "ok",
+        "elapsed_ms": stt_elapsed_ms,
+        "language": stt_analysis.language,
+        "task": stt_analysis.task,
+        "segment_count": len(stt_analysis.segments),
+        "transcript": stt_analysis.transcript,
+        "segments": [segment.to_dict() for segment in stt_analysis.segments],
+    }
+    if stt_warnings:
+        stt_stage["warnings"] = stt_warnings
+
     payload: dict[str, object] = {
         "status": "ok",
         **base_payload,
         "transcript": stt_analysis.transcript,
         "translated_text": "",
         "stages": {
-            "stt": {
-                "status": "ok",
-                "language": stt_analysis.language,
-                "task": stt_analysis.task,
-                "segment_count": len(stt_analysis.segments),
-                "transcript": stt_analysis.transcript,
-                "segments": [segment.to_dict() for segment in stt_analysis.segments],
-            },
+            "stt": stt_stage,
             "translation": {"status": "pending"},
             "tts": {"status": "pending"},
         },
@@ -125,6 +176,7 @@ def localize_audio(
         }
         return payload
 
+    t0 = time.monotonic()
     try:
         translated_text = translation_client.translate(
             stt_analysis.transcript,
@@ -147,11 +199,15 @@ def localize_audio(
             },
         ) from exc
 
+    translation_elapsed_ms = round((time.monotonic() - t0) * 1000)
+    logger.info("Translation completed in %d ms", translation_elapsed_ms)
+
     payload["translated_text"] = translated_text
     payload["stages"] = {
         **payload["stages"],
         "translation": {
             "status": "ok",
+            "elapsed_ms": translation_elapsed_ms,
             "source_language": normalized_source_language or "auto",
             "target_language": normalized_target_language,
             "text": translated_text,
@@ -167,11 +223,22 @@ def localize_audio(
 
     tts_language = validate_tts_language(normalized_target_language)
 
+    ref = _select_reference_segment(audio, stt_analysis.segments)
+    if ref is not None:
+        logger.info(
+            "Voice cloning: selected %.1fs reference segment (prob=%.2f)",
+            len(ref[0]) / ref[2], max((s.average_probability for s in stt_analysis.segments if s.text == ref[1]), default=0),
+        )
+
+    t0 = time.monotonic()
     try:
         synthesized = tts_client.synthesize(
             translated_text,
             language=tts_language,
             speaker_prompt=speaker_prompt,
+            ref_audio=ref[0] if ref else None,
+            ref_audio_sample_rate=ref[2] if ref else 16000,
+            ref_text=ref[1] if ref else None,
         )
     except Exception as exc:
         raise LocalizationStageError(
@@ -188,16 +255,25 @@ def localize_audio(
             },
         ) from exc
 
+    tts_elapsed_ms = round((time.monotonic() - t0) * 1000)
+    total_elapsed_ms = round((time.monotonic() - t0_pipeline) * 1000)
+    logger.info("TTS completed in %d ms (total pipeline: %d ms)", tts_elapsed_ms, total_elapsed_ms)
+
+    vc_mode = "icl" if (ref and ref[1]) else ("x_vector" if ref else "none")
     payload["stages"] = {
         **payload["stages"],
         "tts": {
             "status": "ok",
+            "elapsed_ms": tts_elapsed_ms,
             "language": tts_language,
+            "voice_cloning": ref is not None,
+            "voice_cloning_mode": vc_mode,
             "sample_rate": synthesized.sample_rate,
             "duration_ms": synthesized.duration_ms,
             "content_type": "audio/wav",
             "audio_base64": encode_wav_preview(synthesized),
         },
     }
+    payload["elapsed_ms"] = total_elapsed_ms
 
     return payload

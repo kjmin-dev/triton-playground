@@ -15,12 +15,13 @@ from pipeline.tts import SynthesizedAudio
 
 class LocalizationPipelineTest(unittest.TestCase):
     def test_localize_audio_runs_stt_translation_and_tts(self) -> None:
-        audio = AudioBuffer(samples=np.ones(512 * 8, dtype=np.float32), sample_rate=16000)
+        num_windows = 100  # 100 * 512 samples = 3.2s at 16kHz
+        audio = AudioBuffer(samples=np.ones(512 * num_windows, dtype=np.float32), sample_rate=16000)
 
         class FakeVadClient:
             def score_windows(self, windows: np.ndarray) -> list[float]:
                 _ = windows
-                return [0.9] * 8
+                return [0.9] * num_windows
 
         class FakeSttClient:
             def transcribe(self, *args, **kwargs) -> str:
@@ -33,8 +34,14 @@ class LocalizationPipelineTest(unittest.TestCase):
                 return "annyeong haseyo"
 
         class FakeTtsClient:
-            def synthesize(self, text: str, *, language: str, speaker_prompt: str | None = None) -> SynthesizedAudio:
+            def synthesize(
+                self, text: str, *, language: str, speaker_prompt: str | None = None,
+                ref_audio: np.ndarray | None = None, ref_audio_sample_rate: int = 16000,
+                ref_text: str | None = None,
+            ) -> SynthesizedAudio:
                 self.call = (text, language, speaker_prompt)
+                self.ref_audio = ref_audio
+                self.ref_text = ref_text
                 return SynthesizedAudio(sample_rate=24000, samples=np.linspace(-0.2, 0.2, num=480, dtype=np.float32))
 
         translation = FakeTranslationClient()
@@ -64,6 +71,12 @@ class LocalizationPipelineTest(unittest.TestCase):
         self.assertEqual(translation.call, ("hello world", "en", "ko"))
         self.assertEqual(tts.call, ("annyeong haseyo", "ko", "warm"))
         self.assertTrue(payload["stages"]["tts"]["audio_base64"])
+        self.assertIsNotNone(tts.ref_audio)
+        self.assertIsNotNone(tts.ref_text)
+        self.assertTrue(payload["stages"]["tts"]["voice_cloning"])
+        self.assertIn("elapsed_ms", payload["stages"]["stt"])
+        self.assertIn("elapsed_ms", payload["stages"]["translation"])
+        self.assertIn("elapsed_ms", payload["stages"]["tts"])
 
     def test_localize_audio_skips_downstream_stages_when_no_speech_is_detected(self) -> None:
         audio = AudioBuffer(samples=np.zeros(512 * 4, dtype=np.float32), sample_rate=16000)

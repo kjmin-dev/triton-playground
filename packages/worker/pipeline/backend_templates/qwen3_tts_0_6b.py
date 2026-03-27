@@ -20,6 +20,8 @@ DEFAULT_SPEAKERS = {
     "zh": "Vivian",
 }
 
+REF_AUDIO_SAMPLE_RATE = 16000
+
 
 def _tensor_as_bytes(request, name: str) -> str:
     tensor = pb_utils.get_input_tensor_by_name(request, name)
@@ -36,6 +38,17 @@ def _tensor_as_bytes(request, name: str) -> str:
     if isinstance(value, str):
         return value
     return str(value)
+
+
+def _tensor_as_float_audio(request, name: str) -> np.ndarray | None:
+    """Read an optional FP32 audio tensor. Returns None if absent or single-element."""
+    tensor = pb_utils.get_input_tensor_by_name(request, name)
+    if tensor is None:
+        return None
+    arr = tensor.as_numpy().reshape(-1).astype(np.float32)
+    if arr.size <= 1:
+        return None
+    return arr
 
 
 class TritonPythonModel:
@@ -66,18 +79,32 @@ class TritonPythonModel:
             text = _tensor_as_bytes(request, "text").strip()
             language = _tensor_as_bytes(request, "language").strip().lower()
             speaker_prompt = _tensor_as_bytes(request, "speaker_prompt").strip()
+            ref_audio = _tensor_as_float_audio(request, "ref_audio")
+            ref_text = _tensor_as_bytes(request, "ref_text").strip()
 
             language_name = LANGUAGE_NAMES.get(language)
-            speaker = DEFAULT_SPEAKERS.get(language)
-            if language_name is None or speaker is None:
+            if language_name is None:
                 raise pb_utils.TritonModelException(f"unsupported TTS language: {language}")
 
-            wavs, sample_rate = self._model.generate_custom_voice(
-                text=text,
-                language=language_name,
-                speaker=speaker,
-                instruct=speaker_prompt or None,
-            )
+            if ref_audio is not None:
+                use_icl = bool(ref_text)
+                wavs, sample_rate = self._model.generate_voice_clone(
+                    text=text,
+                    language=language_name,
+                    ref_audio=(ref_audio, REF_AUDIO_SAMPLE_RATE),
+                    ref_text=ref_text if use_icl else None,
+                    x_vector_only_mode=not use_icl,
+                )
+            else:
+                speaker = DEFAULT_SPEAKERS.get(language)
+                if speaker is None:
+                    raise pb_utils.TritonModelException(f"no default speaker for language: {language}")
+                wavs, sample_rate = self._model.generate_custom_voice(
+                    text=text,
+                    language=language_name,
+                    speaker=speaker,
+                    instruct=speaker_prompt or None,
+                )
 
             if not wavs:
                 raise pb_utils.TritonModelException("Qwen3-TTS returned an empty waveform list")
