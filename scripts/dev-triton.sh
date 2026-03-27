@@ -91,12 +91,16 @@ fi
 
 if [[ "$USE_DOCKER" == "1" ]]; then
   if [[ "$TRITON_RUNTIME_PROFILE" != "baseline" ]]; then
-    echo "Building Triton dev image for profile '$TRITON_RUNTIME_PROFILE'..." >&2
-    docker build -q \
-      -t "$TRITON_DEV_IMAGE" \
-      --build-arg "TRITON_RUNTIME_PROFILE=$TRITON_RUNTIME_PROFILE" \
-      -f "$ROOT_DIR/packages/triton/Dockerfile" \
-      "$ROOT_DIR" >&2
+    if docker image inspect "$TRITON_DEV_IMAGE" >/dev/null 2>&1; then
+      echo "Using existing Triton dev image '$TRITON_DEV_IMAGE'. Run 'docker build -t $TRITON_DEV_IMAGE --build-arg TRITON_RUNTIME_PROFILE=$TRITON_RUNTIME_PROFILE -f packages/triton/Dockerfile .' to rebuild." >&2
+    else
+      echo "Building Triton dev image for profile '$TRITON_RUNTIME_PROFILE'..." >&2
+      docker build -q \
+        -t "$TRITON_DEV_IMAGE" \
+        --build-arg "TRITON_RUNTIME_PROFILE=$TRITON_RUNTIME_PROFILE" \
+        -f "$ROOT_DIR/packages/triton/Dockerfile" \
+        "$ROOT_DIR" >&2
+    fi
     TRITON_IMAGE="$TRITON_DEV_IMAGE"
   fi
 
@@ -119,11 +123,15 @@ if [[ "$USE_DOCKER" == "1" ]]; then
     --model-repository=/models \
     --http-port="${TRITON_HTTP_PORT:-18000}" \
     --grpc-port="${TRITON_GRPC_PORT:-18001}" \
-    --metrics-port="${TRITON_METRICS_PORT:-18002}"
+    --metrics-port="${TRITON_METRICS_PORT:-18002}" \
+    --exit-on-error=false \
+    --strict-readiness=false
 else
   exec "$TRITON_SERVER_BIN" \
     --model-repository="$MODEL_REPOSITORY_ROOT" \
     --http-port="${TRITON_HTTP_PORT:-18000}" \
     --grpc-port="${TRITON_GRPC_PORT:-18001}" \
-    --metrics-port="${TRITON_METRICS_PORT:-18002}"
+    --metrics-port="${TRITON_METRICS_PORT:-18002}" \
+    --exit-on-error=false \
+    --strict-readiness=false
 fi
