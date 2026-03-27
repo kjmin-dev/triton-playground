@@ -17,11 +17,13 @@ declare global {
   }
 }
 
-const DEFAULT_WORKER_PORT = "8080";
+const DEFAULT_WORKER_PORT = '8080';
 
 export function getWorkerBaseUrl() {
-  if (typeof window === "undefined") {
-    return import.meta.env.WORKER_API_URL ?? import.meta.env.VITE_WORKER_API_URL ?? `http://localhost:${DEFAULT_WORKER_PORT}`;
+  if (typeof window === 'undefined') {
+    return (
+      import.meta.env.WORKER_API_URL ?? import.meta.env.VITE_WORKER_API_URL ?? `http://localhost:${DEFAULT_WORKER_PORT}`
+    );
   }
 
   const runtimeConfig = window.__TRITON_PLAYGROUND_CONFIG__;
@@ -29,14 +31,12 @@ export function getWorkerBaseUrl() {
     return runtimeConfig.workerApiUrl;
   }
 
-  const configuredWorkerApiUrl =
-    import.meta.env.WORKER_API_URL ?? import.meta.env.VITE_WORKER_API_URL;
+  const configuredWorkerApiUrl = import.meta.env.WORKER_API_URL ?? import.meta.env.VITE_WORKER_API_URL;
   if (configuredWorkerApiUrl) {
     return configuredWorkerApiUrl;
   }
 
-  const workerPort =
-    runtimeConfig?.workerPort ?? import.meta.env.WORKER_PORT ?? DEFAULT_WORKER_PORT;
+  const workerPort = runtimeConfig?.workerPort ?? import.meta.env.WORKER_PORT ?? DEFAULT_WORKER_PORT;
 
   return `${window.location.protocol}//${window.location.hostname}:${workerPort}`;
 }
