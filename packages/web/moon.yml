@@ -9,11 +9,11 @@ tasks:
   build:
     command: bun --bun vite build
   lint:
-    command: bunx biome check --config-path=../../biome.json src/
+    command: bunx biome check src/
     options:
       cache: false
   format:
-    command: bunx biome check --fix --config-path=../../biome.json src/
+    command: bunx biome check --fix src/
   typecheck:
     command: bunx tsc --noEmit
     options:

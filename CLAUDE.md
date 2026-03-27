@@ -70,6 +70,52 @@ TTS uses Qwen3-TTS Base model with `generate_voice_clone()` to clone the input s
 ## Conventions
 
 - **Python**: `uv`, `ruff`, `pytest`, type hints (`X | Y`)
-- **Frontend**: file-based routing (`src/routes/`), shadcn Base UI Nova, `@/*` alias
+- **Frontend**: file-based routing (`src/routes/`), shadcn Base UI Nova, `@/*` alias, biome for lint/format
 - **Infra**: moonrepo, Bun, Docker Compose, Triton 24.05
 - **CUDA**: host driver must support CUDA 12.4 (driver >= 550); Dockerfile pins `torch>=2.6,<2.7` with cu124
+
+## CI & Quality Gates
+
+Before submitting any code change, you MUST pass the full check suite. This is a hard requirement, not a suggestion.
+
+### Check commands
+
+```sh
+# Full CI (lint + format-check + typecheck + test + build)
+bun run check
+
+# Individual checks
+cd packages/worker && .venv/bin/ruff check .                  # Python lint
+cd packages/worker && .venv/bin/ruff format --check .         # Python format
+cd packages/worker && PYTHONPATH=. .venv/bin/python -m pytest tests/ -q  # Python tests
+npx biome check packages/web/src/                             # Web lint + format
+cd packages/web && bunx tsc --noEmit                          # TypeScript typecheck
+cd packages/web && bun --bun vite build                       # Web build
+```
+
+### Rules
+
+- **Always run `bun run check` before considering any task complete.** If it fails, fix the issue before moving on.
+- **Never bypass git hooks** (`--no-verify`). The pre-commit and pre-push hooks exist as safety nets.
+- **Python linting**: ruff with `E, F, W, I, UP, B, SIM, RUF` rule sets. Auto-fix import sorting with `ruff check --fix`.
+- **Python formatting**: ruff format (double quotes, 120 char line width).
+- **Web linting**: biome with the project's rule set (single quotes, trailing commas, 120 char width). Auto-fix with `npx biome check --fix`.
+- **TypeScript**: strict mode, `noEmit`. All type errors must be resolved.
+- **Tests**: pytest for Python, all tests must pass. Do not mark a task as done with failing tests.
+- **If you add a new Python file**, ensure imports are sorted (`ruff check --fix`). If you add a new `.tsx` file, ensure biome passes.
+- **Do not add `# type: ignore`, `// @ts-ignore`, `noqa`, or `biome-ignore` without a clear justification in a comment.**
+
+### Git hooks (lefthook)
+
+| Hook | Checks | Scope |
+|------|--------|-------|
+| `pre-commit` | ruff check, ruff format --check, biome check | Staged files only (fast) |
+| `pre-push` | pytest, tsc --noEmit, vite build | Full project (thorough) |
+
+### Commit conventions
+
+- Use [Conventional Commits](https://www.conventionalcommits.org/) format: `type(scope): description`
+- Types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`
+- Scopes: `worker`, `web`, `triton`, `infra` or omit for cross-cutting changes
+- Keep commits atomic: one logical change per commit
+- Write commit messages that explain *why*, not *what* (the diff shows *what*)
