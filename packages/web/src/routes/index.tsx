@@ -10,6 +10,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { getWorkerBaseUrl } from "@/lib/runtime-config";
 
 export const Route = createFileRoute("/")({
   component: Home,
@@ -63,17 +64,6 @@ const THRESHOLD_PRESETS = [0.3, 0.45, 0.5, 0.65, 0.8];
 const WINDOW_SCORE_PREVIEW_LIMIT = 80;
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const MAX_DURATION_SECONDS = 15 * 60;
-
-function getWorkerBaseUrl() {
-  if (typeof window === "undefined") {
-    return import.meta.env.VITE_WORKER_API_URL ?? "http://localhost:8080";
-  }
-
-  return (
-    import.meta.env.VITE_WORKER_API_URL ??
-    `${window.location.protocol}//${window.location.hostname}:8080`
-  );
-}
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) {

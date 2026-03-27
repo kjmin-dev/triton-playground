@@ -27,15 +27,15 @@ All models: open-source, permissive license (MIT/Apache 2.0), downloaded from Hu
 ```sh
 bun install           # JS deps + moon setup (Python 3.10.12, uv)
 bun run dev           # all dev servers
-bun run dev:web       # web → localhost:3000
-bun run dev:worker    # worker → localhost:8080
+bun run dev:web       # web → localhost:4000 by default, configurable via WEB_PORT
+bun run dev:worker    # worker → localhost:8080 by default, configurable via WORKER_PORT
 docker compose up     # full stack with GPU (Triton + worker + web)
 ```
 
 ## Architecture
 
 ```
-Browser → TanStack Start → Worker API (FastAPI :8080) → Triton gRPC (:8001) → GPU
+Browser → TanStack Start → Worker API (FastAPI :WORKER_PORT, default 8080) → Triton gRPC (:TRITON_GRPC_PORT, default 8001) → GPU
 ```
 
 Worker orchestrates the pipeline: audio upload → separation → STT → translation → TTS → result.

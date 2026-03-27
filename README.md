@@ -38,6 +38,8 @@ docker compose up --build
 
 `bun install` runs `scripts/setup.sh`, which installs the pinned moon Python/uv toolchains, updates your shell PATH for proto shims, and bootstraps + syncs `packages/worker/.venv` with Python `3.10.12`.
 
+All local bind settings live in the repo root `.env` file. Copy `.env.example` to `.env` and change `WEB_HOST`, `WEB_PORT`, `WORKER_HOST`, `WORKER_PORT`, `TRITON_HTTP_PORT`, `TRITON_GRPC_PORT`, and `TRITON_METRICS_PORT` there instead of editing code.
+
 To inspect the policy catalog without changing the baseline runtime set:
 
 ```sh
@@ -58,17 +60,20 @@ TRITON_GRPC_URL=localhost:8001 MODEL_REPOSITORY_ROOT=model_repository bun run de
 
 Open:
 
-- web: http://localhost:3000
+- web: http://localhost:4000
 - worker: http://localhost:8080
 - triton metrics: http://localhost:8002/metrics
+
+Those URLs are the defaults from `.env.example`; they are configurable through `.env`.
+For LAN access during development, keep `WEB_HOST=0.0.0.0` and `WORKER_HOST=0.0.0.0`, then open `http://<your-machine-ip>:4000`.
 
 ## Architecture
 
 ```
 Browser
-  -> Web UI (:3000)
-  -> Worker API (:8080)
-  -> Triton gRPC (:8001)
+  -> Web UI (:WEB_PORT, default 4000)
+  -> Worker API (:WORKER_PORT, default 8080)
+  -> Triton gRPC (:TRITON_GRPC_PORT, default 8001)
   -> approved model artifact in model_repository/
 ```
 

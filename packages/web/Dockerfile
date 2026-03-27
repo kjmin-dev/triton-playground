@@ -12,4 +12,4 @@ WORKDIR /app
 COPY packages/web/package.json packages/web/bun.lock* ./
 RUN bun install --frozen-lockfile --production
 COPY --from=build /app/dist ./dist
-CMD ["bun", "dist/server/server.js"]
+CMD ["sh", "-c", "PORT=${WEB_PORT:-4000} bun dist/server/server.js"]

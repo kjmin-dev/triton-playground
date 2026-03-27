@@ -21,13 +21,18 @@ services:
 
   triton:
     image: nvcr.io/nvidia/tritonserver:24.05-py3
-    command: tritonserver --model-repository=/models
+    command: >-
+      tritonserver
+      --model-repository=/models
+      --http-port=${TRITON_HTTP_PORT:-8000}
+      --grpc-port=${TRITON_GRPC_PORT:-8001}
+      --metrics-port=${TRITON_METRICS_PORT:-8002}
     volumes:
       - ./model_repository:/models
     ports:
-      - "8000:8000" # HTTP
-      - "8001:8001" # gRPC
-      - "8002:8002" # Metrics
+      - "${TRITON_HTTP_PORT:-8000}:${TRITON_HTTP_PORT:-8000}" # HTTP
+      - "${TRITON_GRPC_PORT:-8001}:${TRITON_GRPC_PORT:-8001}" # gRPC
+      - "${TRITON_METRICS_PORT:-8002}:${TRITON_METRICS_PORT:-8002}" # Metrics
     deploy:
       resources:
         reservations:
@@ -42,12 +47,16 @@ services:
           "CMD",
           "python3",
           "-c",
-          "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/v2/health/ready').status == 200 else 1)"
+          "import os, sys, urllib.request; port = os.getenv('TRITON_HTTP_PORT', '8000'); sys.exit(0 if urllib.request.urlopen(f'http://localhost:{port}/v2/health/ready').status == 200 else 1)"
         ]
       interval: 5s
       timeout: 3s
       retries: 12
       start_period: 10s
+    environment:
+      - TRITON_HTTP_PORT=${TRITON_HTTP_PORT:-8000}
+      - TRITON_GRPC_PORT=${TRITON_GRPC_PORT:-8001}
+      - TRITON_METRICS_PORT=${TRITON_METRICS_PORT:-8002}
     depends_on:
       model-init:
         condition: service_completed_successfully
@@ -57,11 +66,12 @@ services:
       context: .
       dockerfile: packages/worker/Dockerfile
     ports:
-      - "8080:8080"
+      - "${WORKER_PORT:-8080}:${WORKER_PORT:-8080}"
     environment:
-      - TRITON_GRPC_URL=triton:8001
-      - MODEL_PROFILE=baseline
+      - TRITON_GRPC_URL=triton:${TRITON_GRPC_PORT:-8001}
+      - MODEL_PROFILE=${MODEL_PROFILE:-baseline}
       - MODEL_REPOSITORY_ROOT=/models
+      - WORKER_PORT=${WORKER_PORT:-8080}
     volumes:
       - ./model_repository:/models:ro
     depends_on:
@@ -73,7 +83,11 @@ services:
       context: .
       dockerfile: packages/web/Dockerfile
     ports:
-      - "3000:3000"
+      - "${WEB_PORT:-4000}:${WEB_PORT:-4000}"
+    environment:
+      - WEB_PORT=${WEB_PORT:-4000}
+      - WORKER_PORT=${WORKER_PORT:-8080}
+      - WORKER_API_URL=${WORKER_API_URL:-}
     depends_on:
       - worker
 

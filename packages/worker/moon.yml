@@ -7,7 +7,7 @@ tasks:
   compile:
     command: .venv/bin/python -m compileall .
   dev:
-    command: .venv/bin/uvicorn api.main:app --reload --host 0.0.0.0 --port 8080
+    command: bash ../../scripts/dev-worker.sh
     options:
       persistent: true
   prepare-models:

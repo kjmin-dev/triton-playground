@@ -8,4 +8,4 @@ COPY packages/worker/api ./api
 COPY packages/worker/pipeline ./pipeline
 RUN uv pip install --system .
 
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port ${WORKER_PORT:-8080}"]
