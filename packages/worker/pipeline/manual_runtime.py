@@ -39,6 +39,7 @@ def _render_runtime_config(spec: ModelSpec) -> str:
     input_blocks = "".join(_render_pbtxt_tensor_block("input", entry) for entry in spec.triton_inputs)
     output_blocks = "".join(_render_pbtxt_tensor_block("output", entry) for entry in spec.triton_outputs)
     backend = spec.triton_backend or "python"
+    device_kind = "KIND_GPU" if backend == "python" else "KIND_CPU"
     return dedent(
         f"""\
         name: "{spec.repository_model_name}"
@@ -46,7 +47,7 @@ def _render_runtime_config(spec: ModelSpec) -> str:
         max_batch_size: 0
         instance_group [
           {{
-            kind: KIND_CPU
+            kind: {device_kind}
             count: 1
           }}
         ]
