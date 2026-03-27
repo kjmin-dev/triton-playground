@@ -4,6 +4,7 @@ tasks:
   dev:
     command: bun --bun vite dev
     options:
+      cache: false
       persistent: true
   build:
     command: bun --bun vite build

@@ -60,6 +60,52 @@ class PrepareModelsTest(unittest.TestCase):
         self.assertIn("audio_pcm: FP32[1, samples]", whisper["triton_inputs"][0])
         self.assertIn("manual download", whisper["reason"])
 
+    def test_catalog_manifest_records_localization_contracts_without_installing_models(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = prepare_model_repository(
+                output_root=Path(temp_dir),
+                model_ids=["madlad400_3b_mt", "qwen3_tts_0_6b"],
+            )
+
+        records = {record["model_id"]: record for record in manifest["models"]}
+        translation = records["madlad400_3b_mt"]
+        tts = records["qwen3_tts_0_6b"]
+
+        self.assertFalse(translation["installed"])
+        self.assertEqual(translation["repository_model_name"], "madlad400_3b_mt")
+        self.assertIn("translated_text: BYTES[1] UTF-8 translated text", translation["triton_outputs"])
+
+        self.assertFalse(tts["installed"])
+        self.assertEqual(tts["repository_model_name"], "qwen3_tts_0_6b")
+        self.assertIn("audio_pcm: FP32[1, samples]", tts["triton_outputs"][0])
+
+    def test_manual_stub_root_writes_translation_and_tts_templates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest = prepare_model_repository(
+                output_root=temp_root / "repository",
+                model_ids=["whisper_large_v3_turbo", "madlad400_3b_mt", "qwen3_tts_0_6b"],
+                manual_stub_root=temp_root / "manual_model_stubs",
+            )
+
+            self.assertEqual(manifest["manual_stub_root"], str((temp_root / "manual_model_stubs")))
+            records = {record["model_id"]: record for record in manifest["models"]}
+
+            whisper = records["whisper_large_v3_turbo"]
+            self.assertIn("manual_stub_path", whisper)
+            self.assertTrue(any(path.endswith("config.pbtxt.template") for path in whisper["manual_stub_files"]))
+
+            config_template = temp_root / "manual_model_stubs" / "qwen3_tts_0_6b" / "config.pbtxt.template"
+            model_template = temp_root / "manual_model_stubs" / "qwen3_tts_0_6b" / "1" / "model.py.template"
+            readme = temp_root / "manual_model_stubs" / "madlad400_3b_mt" / "README.md"
+
+            self.assertTrue(config_template.exists())
+            self.assertTrue(model_template.exists())
+            self.assertTrue(readme.exists())
+            self.assertIn('backend: "python"', config_template.read_text(encoding="utf-8"))
+            self.assertIn("Manual Triton Python backend template", model_template.read_text(encoding="utf-8"))
+            self.assertIn("Bring-up steps", readme.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

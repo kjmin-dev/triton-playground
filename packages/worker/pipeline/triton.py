@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from pipeline.runtime_status import TritonReadiness
 
@@ -13,6 +14,34 @@ if TYPE_CHECKING:
 
 class TritonUnavailableError(RuntimeError):
     pass
+
+
+def describe_triton_error(*, url: str, action: str, exc: Exception) -> str:
+    detail = str(exc).strip()
+    normalized = detail.lower()
+
+    if "connection refused" in normalized or "failed to connect to all addresses" in normalized:
+        hostname = urlsplit(f"grpc://{url}").hostname or url
+        location_hint = (
+            "No Triton server is listening on the local gRPC port."
+            if hostname in {"localhost", "127.0.0.1", "::1"}
+            else f"Triton is not accepting connections at {url}."
+        )
+        return (
+            f"{action} at {url} failed because the connection was refused. "
+            f"{location_hint} Start Triton first with `docker compose up --build` "
+            "or point TRITON_GRPC_URL at a running Triton gRPC endpoint. "
+            f"Original error: {detail}"
+        )
+
+    if "name resolution" in normalized or "dns" in normalized or "no address associated with hostname" in normalized:
+        return (
+            f"{action} at {url} failed because the Triton hostname could not be resolved. "
+            "Verify TRITON_GRPC_URL points to a reachable host:port. "
+            f"Original error: {detail}"
+        )
+
+    return f"{action} at {url} failed: {detail}"
 
 
 @dataclass(frozen=True)
@@ -211,7 +240,9 @@ class TritonVadClient:
         try:
             self._client = grpcclient.InferenceServerClient(url=url, verbose=False)
         except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
-            raise TritonUnavailableError(f"Failed to create Triton client for {url}: {exc}") from exc
+            raise TritonUnavailableError(
+                describe_triton_error(url=url, action="Creating the Triton client", exc=exc)
+            ) from exc
 
     def readiness(self) -> TritonReadiness:
         try:
@@ -242,7 +273,9 @@ class TritonVadClient:
                 model_name=self._model_name,
             )
         except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
-            raise TritonUnavailableError(f"Failed to query Triton readiness: {exc}") from exc
+            raise TritonUnavailableError(
+                describe_triton_error(url=self._url, action="Querying Triton readiness", exc=exc)
+            ) from exc
 
     def score_windows(self, windows: "np.ndarray") -> list[float]:
         readiness = self.readiness()
@@ -276,6 +309,8 @@ class TritonVadClient:
                 probabilities.append(float(response.as_numpy("output").reshape(-1)[0]))
                 state = response.as_numpy("stateN").astype(np.float32)
         except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
-            raise TritonUnavailableError(f"Triton VAD inference failed: {exc}") from exc
+            raise TritonUnavailableError(
+                describe_triton_error(url=self._url, action="Running Triton VAD inference", exc=exc)
+            ) from exc
 
         return probabilities

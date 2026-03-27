@@ -54,6 +54,14 @@ bun run prepare:models --profile stt
 
 The `stt` manifest records the manual Whisper repository name and tensor contract so the worker and operator agree on the same Triton interface before any weights are mounted.
 
+To scaffold the first localization backends without putting half-configured models into `model_repository/`:
+
+```sh
+bun run prepare:manual-stubs
+```
+
+That keeps the runnable baseline under `model_repository/` and writes manual Triton templates for Whisper, MADLAD, and Qwen3-TTS into `manual_model_stubs/`.
+
 For local worker development against an already-running Triton instance:
 
 ```sh
@@ -132,6 +140,48 @@ curl -X POST "http://localhost:8080/api/stt?threshold=0.5&language=ko" \
 
 If the Whisper repository is missing from Triton, `/api/stt` returns `503` with the Triton readiness summary instead of silently falling back.
 
+## Localization Preview
+
+The first end-to-end localization pair is:
+
+- translation: `madlad400_3b_mt`
+- TTS: `qwen3_tts_0_6b`
+
+Both stay in the manual lane. The worker exposes:
+
+- `POST /api/localize` for `Audio -> VAD -> STT -> Translation -> TTS`
+- `POST /api/tts` for text-only synthesized preview
+
+`/api/localize` returns stage-level status plus a browser-playable WAV preview when all manual backends are mounted in Triton.
+
+`bun run prepare:manual-stubs` generates:
+
+- `manual_model_stubs/whisper_large_v3_turbo/`
+- `manual_model_stubs/madlad400_3b_mt/`
+- `manual_model_stubs/qwen3_tts_0_6b/`
+
+Each scaffold contains:
+
+- `README.md` with upstream revision and bring-up steps
+- `config.pbtxt.template`
+- `1/model.py.template`
+
+These are templates only. They are intentionally outside the live `model_repository/` tree so Triton does not try to load incomplete manual backends.
+
+Example:
+
+```sh
+curl -X POST "http://localhost:8080/api/localize?threshold=0.5&target_language=ja" \
+  -F "file=@sample.wav"
+```
+
+Expected manual Triton contracts:
+
+- `madlad400_3b_mt`: `text`, `source_language`, `target_language` -> `translated_text`
+- `qwen3_tts_0_6b`: `text`, `language`, `speaker_prompt` -> `audio_pcm`, `sample_rate`
+
+If a downstream manual backend is unavailable, the response keeps the completed upstream stage results and marks the failing stage explicitly.
+
 ## Scripts
 
 | Command | Description |
@@ -140,6 +190,7 @@ If the Whisper repository is missing from Triton, `/api/stt` returns `503` with 
 | `bun run dev:web` | Web only |
 | `bun run dev:worker` | Worker only |
 | `bun run prepare:models` | Download the approved baseline model into `model_repository/` |
+| `bun run prepare:manual-stubs` | Generate manual Triton backend templates for the first localization flow |
 | `bun run build` | Build the web app |
 | `bun run check` | Build web + compile worker + run stdlib tests |
 | `docker compose up --build` | `model-init` + Triton + worker + web |

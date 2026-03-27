@@ -9,11 +9,16 @@ tasks:
   dev:
     command: bash ../../scripts/dev-worker.sh
     options:
+      cache: false
       persistent: true
   prepare-models:
     command: PYTHONPATH=. .venv/bin/python -m pipeline.prepare_models --profile baseline --output-root ../../model_repository
+  prepare-manual-stubs:
+    command: PYTHONPATH=. .venv/bin/python -m pipeline.prepare_models --profile localize --output-root ../../model_repository --manual-stub-root ../../manual_model_stubs
   lint:
     command: .venv/bin/ruff check .
+    options:
+      cache: false
   format:
     command: .venv/bin/ruff format .
   test:

@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pipeline.audio import AudioBuffer
 from pipeline.stt import (
     TritonUnavailableError,
+    TritonWhisperClient,
     analyze_stt,
     normalize_whisper_language,
     validate_whisper_task,
@@ -95,6 +96,30 @@ class SttAnalysisTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "task must be one of"):
             validate_whisper_task("translate")
+
+    def test_whisper_readiness_connection_refused_includes_startup_guidance(self) -> None:
+        class FakeClient:
+            def is_server_live(self) -> bool:
+                raise RuntimeError(
+                    "failed to connect to all addresses; last error: UNKNOWN: "
+                    "ipv4:127.0.0.1:8001: Failed to connect to remote host: connect: Connection refused (111)"
+                )
+
+            def is_server_ready(self) -> bool:  # pragma: no cover - never reached after failure
+                return False
+
+            def is_model_ready(self, model_name: str) -> bool:  # pragma: no cover - never reached after failure
+                _ = model_name
+                return False
+
+        client = object.__new__(TritonWhisperClient)
+        client._grpcclient = object()
+        client._url = "127.0.0.1:8001"
+        client._model_name = "whisper_large_v3_turbo"
+        client._client = FakeClient()
+
+        with self.assertRaisesRegex(TritonUnavailableError, "docker compose up --build"):
+            client.readiness()
 
 
 if __name__ == "__main__":

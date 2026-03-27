@@ -77,6 +77,34 @@ class TritonReadinessTest(unittest.TestCase):
         self.assertFalse(readiness.model_present)
         self.assertIn("was not found in the Triton model repository index", readiness.summary)
 
+    def test_readiness_connection_refused_includes_startup_guidance(self) -> None:
+        class FakeClient:
+            def is_server_live(self) -> bool:
+                raise RuntimeError(
+                    "failed to connect to all addresses; last error: UNKNOWN: "
+                    "ipv4:127.0.0.1:8001: Failed to connect to remote host: connect: Connection refused (111)"
+                )
+
+            def is_server_ready(self) -> bool:  # pragma: no cover - never reached after failure
+                return False
+
+            def is_model_ready(self, model_name: str) -> bool:  # pragma: no cover - never reached after failure
+                _ = model_name
+                return False
+
+        client = object.__new__(TritonVadClient)
+        client._grpcclient = object()
+        client._url = "127.0.0.1:8001"
+        client._model_name = "silero_vad"
+        client._client = FakeClient()
+
+        with self.assertRaises(TritonUnavailableError) as context:
+            client.readiness()
+
+        message = str(context.exception)
+        self.assertIn("docker compose up --build", message)
+        self.assertIn("TRITON_GRPC_URL", message)
+
 
 class ModelRepositoryStatusTest(unittest.TestCase):
     def test_repository_status_reports_missing_manifest(self) -> None:

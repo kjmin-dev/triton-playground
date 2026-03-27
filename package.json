@@ -10,6 +10,7 @@
     "build": "moon run :build",
     "build:web": "moon run web:build",
     "prepare:models": "moon run worker:prepare-models",
+    "prepare:manual-stubs": "moon run worker:prepare-manual-stubs",
     "lint": "moon run :lint",
     "format": "moon run :format",
     "test:worker": "moon run worker:test",

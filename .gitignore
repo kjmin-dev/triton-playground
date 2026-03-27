@@ -54,3 +54,7 @@ venv/
 # runtime model repository
 model_repository/*
 !model_repository/.gitkeep
+
+# generated manual backend scaffolds
+manual_model_stubs/*
+!manual_model_stubs/.gitkeep

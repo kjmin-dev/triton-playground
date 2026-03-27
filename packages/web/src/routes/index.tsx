@@ -81,6 +81,53 @@ type SttResponse = {
   transcript: string;
 };
 
+type LocalizeResponse = {
+  duration_ms: number;
+  filename: string;
+  message?: string;
+  models: {
+    stt: string;
+    translation: string;
+    tts: string;
+  };
+  sample_rate: number;
+  source_language: string;
+  stage?: string;
+  stages: {
+    stt: {
+      language?: string;
+      message?: string;
+      segment_count?: number;
+      status: string;
+      task?: string;
+      transcript?: string;
+    };
+    translation: {
+      message?: string;
+      reason?: string;
+      source_language?: string;
+      status: string;
+      target_language?: string;
+      text?: string;
+    };
+    tts: {
+      audio_base64?: string;
+      content_type?: string;
+      duration_ms?: number;
+      language?: string;
+      message?: string;
+      reason?: string;
+      sample_rate?: number;
+      status: string;
+    };
+  };
+  status: string;
+  target_language: string;
+  threshold: number;
+  transcript: string;
+  translated_text: string;
+};
+
 const THRESHOLD_PRESETS = [0.3, 0.45, 0.5, 0.65, 0.8];
 const STT_LANGUAGE_OPTIONS = [
   { value: "auto", label: "Auto detect" },
@@ -89,6 +136,7 @@ const STT_LANGUAGE_OPTIONS = [
   { value: "ja", label: "Japanese" },
   { value: "zh", label: "Chinese" },
 ];
+const TARGET_LANGUAGE_OPTIONS = STT_LANGUAGE_OPTIONS.filter((option) => option.value !== "auto");
 const WINDOW_SCORE_PREVIEW_LIMIT = 80;
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const MAX_DURATION_SECONDS = 15 * 60;
@@ -113,19 +161,22 @@ function Home() {
   const workerBaseUrl = getWorkerBaseUrl();
   const [threshold, setThreshold] = React.useState("0.5");
   const [language, setLanguage] = React.useState("auto");
+  const [targetLanguage, setTargetLanguage] = React.useState("en");
   const [selectedFile, setSelectedFile] = React.useState<File | null>(null);
   const [error, setError] = React.useState<string | null>(null);
-  const [activeRun, setActiveRun] = React.useState<"vad" | "stt" | null>(null);
+  const [activeRun, setActiveRun] = React.useState<"vad" | "stt" | "localize" | null>(null);
   const [ready, setReady] = React.useState<ReadyResponse | null>(null);
   const [catalog, setCatalog] = React.useState<ModelsResponse | null>(null);
   const [result, setResult] = React.useState<VadResponse | null>(null);
   const [sttResult, setSttResult] = React.useState<SttResponse | null>(null);
+  const [localizeResult, setLocalizeResult] = React.useState<LocalizeResponse | null>(null);
 
   const parsedThreshold = Number.parseFloat(threshold);
   const thresholdIsValid =
     Number.isFinite(parsedThreshold) && parsedThreshold >= 0.1 && parsedThreshold <= 0.99;
   const isRunningVad = activeRun === "vad";
   const isRunningStt = activeRun === "stt";
+  const isRunningLocalization = activeRun === "localize";
   const selectedFileSummary = selectedFile
     ? `${selectedFile.name} · ${selectedFile.type || "unknown type"} · ${formatBytes(selectedFile.size)}`
     : "No file selected yet";
@@ -134,6 +185,10 @@ function Home() {
     result && thresholdIsValid
       ? result.window_scores.filter((score) => score >= parsedThreshold).length
       : 0;
+  const localizationAudioPreview =
+    localizeResult?.stages.tts.audio_base64 && localizeResult.stages.tts.content_type
+      ? `data:${localizeResult.stages.tts.content_type};base64,${localizeResult.stages.tts.audio_base64}`
+      : null;
 
   React.useEffect(() => {
     let cancelled = false;
@@ -182,7 +237,7 @@ function Home() {
     };
   }, [workerBaseUrl]);
 
-  async function runWorkerRoute(route: "vad" | "stt") {
+  async function runWorkerRoute(route: "vad" | "stt" | "localize") {
     if (!selectedFile) {
       setError("Upload a PCM WAV file first.");
       return;
@@ -197,8 +252,10 @@ function Home() {
     setError(null);
     if (route === "vad") {
       setResult(null);
-    } else {
+    } else if (route === "stt") {
       setSttResult(null);
+    } else {
+      setLocalizeResult(null);
     }
 
     try {
@@ -212,7 +269,7 @@ function Home() {
           method: "POST",
           body: formData,
         });
-      } else {
+      } else if (route === "stt") {
         if (language !== "auto") {
           query.set("language", language);
         }
@@ -220,17 +277,35 @@ function Home() {
           method: "POST",
           body: formData,
         });
+      } else {
+        query.set("target_language", targetLanguage);
+        if (language !== "auto") {
+          query.set("source_language", language);
+        }
+        response = await fetch(`${workerBaseUrl}/api/localize?${query.toString()}`, {
+          method: "POST",
+          body: formData,
+        });
       }
 
-      const payload = await response.json().catch(() => ({} as { detail?: string }));
+      const payload = await response.json().catch(() => ({} as { detail?: string; message?: string }));
       if (!response.ok) {
-        throw new Error(payload.detail ?? `request failed with ${response.status}`);
+        if (route === "localize") {
+          setLocalizeResult(payload as LocalizeResponse);
+        }
+        throw new Error(
+          payload.detail ??
+            payload.message ??
+            `request failed with ${response.status}`,
+        );
       }
 
       if (route === "vad") {
         setResult(payload as VadResponse);
-      } else {
+      } else if (route === "stt") {
         setSttResult(payload as SttResponse);
+      } else {
+        setLocalizeResult(payload as LocalizeResponse);
       }
     } catch (submitError) {
       setError(
@@ -238,7 +313,9 @@ function Home() {
           ? submitError.message
           : route === "vad"
             ? "failed to run VAD"
-            : "failed to run STT",
+            : route === "stt"
+              ? "failed to run STT"
+              : "failed to run localization preview",
       );
     } finally {
       setActiveRun(null);
@@ -332,7 +409,7 @@ function Home() {
                     <label className="grid gap-2 pt-2 text-sm font-medium text-slate-900">
                       <span className="flex items-center gap-2">
                         <Languages className="h-4 w-4 text-slate-500" />
-                        Whisper language hint
+                        Source language hint
                       </span>
                       <select
                         className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
@@ -346,8 +423,29 @@ function Home() {
                         ))}
                       </select>
                       <span className="text-xs font-normal leading-5 text-slate-500">
-                        Optional for the Whisper lane. `auto` keeps language detection in the
-                        manual backend.
+                        Optional for the Whisper lane and localization pipeline. `auto` keeps
+                        language detection in the manual backend.
+                      </span>
+                    </label>
+                    <label className="grid gap-2 pt-2 text-sm font-medium text-slate-900">
+                      <span className="flex items-center gap-2">
+                        <Languages className="h-4 w-4 text-slate-500" />
+                        Target localization language
+                      </span>
+                      <select
+                        className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                        onChange={(event) => setTargetLanguage(event.target.value)}
+                        value={targetLanguage}
+                      >
+                        {TARGET_LANGUAGE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="text-xs font-normal leading-5 text-slate-500">
+                        The first orchestration pair translates with MADLAD and synthesizes a
+                        preview with Qwen3-TTS.
                       </span>
                     </label>
                   </div>
@@ -374,6 +472,16 @@ function Home() {
                       variant="outline"
                     >
                       {isRunningStt ? "Running STT..." : "Run Audio -> VAD -> STT"}
+                    </Button>
+                    <Button
+                      disabled={activeRun !== null}
+                      onClick={() => {
+                        void runWorkerRoute("localize");
+                      }}
+                      type="button"
+                      variant="secondary"
+                    >
+                      {isRunningLocalization ? "Running Localization..." : "Run Localization Preview"}
                     </Button>
                   </div>
                 </div>
@@ -751,6 +859,165 @@ function Home() {
                 ) : (
                   <div className="rounded-xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
                     Run the STT lane to inspect the aggregated transcript and per-segment text.
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="border-slate-200/70 bg-white/90 shadow-sm">
+              <CardHeader>
+                <CardTitle>Localization Preview</CardTitle>
+                <CardDescription>
+                  End-to-end orchestration: Whisper transcript to MADLAD translation to Qwen3-TTS
+                  preview audio.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-5">
+                {localizeResult ? (
+                  <>
+                    <div className="grid gap-3 md:grid-cols-4">
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          source
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {localizeResult.source_language}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          target
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {localizeResult.target_language}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          pipeline
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {localizeResult.models.translation} + {localizeResult.models.tts}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          status
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {localizeResult.status}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-medium text-slate-950">STT stage</div>
+                          <div className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700">
+                            {localizeResult.stages.stt.status}
+                          </div>
+                        </div>
+                        <div className="mt-2 text-xs uppercase tracking-[0.2em] text-slate-500">
+                          {localizeResult.models.stt}
+                        </div>
+                        <p className="mt-3 text-sm leading-6 text-slate-700">
+                          {localizeResult.stages.stt.message ??
+                            localizeResult.stages.stt.transcript ??
+                            "Waiting for transcript."}
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-medium text-slate-950">Translation stage</div>
+                          <div className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700">
+                            {localizeResult.stages.translation.status}
+                          </div>
+                        </div>
+                        <div className="mt-2 text-xs uppercase tracking-[0.2em] text-slate-500">
+                          {localizeResult.models.translation}
+                        </div>
+                        <p className="mt-3 text-sm leading-6 text-slate-700">
+                          {localizeResult.stages.translation.message ??
+                            localizeResult.stages.translation.reason ??
+                            localizeResult.stages.translation.text ??
+                            "Waiting for translated text."}
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-medium text-slate-950">TTS stage</div>
+                          <div className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700">
+                            {localizeResult.stages.tts.status}
+                          </div>
+                        </div>
+                        <div className="mt-2 text-xs uppercase tracking-[0.2em] text-slate-500">
+                          {localizeResult.models.tts}
+                        </div>
+                        <p className="mt-3 text-sm leading-6 text-slate-700">
+                          {localizeResult.stages.tts.message ??
+                            localizeResult.stages.tts.reason ??
+                            (localizationAudioPreview
+                              ? `${localizeResult.stages.tts.duration_ms} ms preview ready`
+                              : "Waiting for synthesized preview.")}
+                        </p>
+                      </div>
+                    </div>
+
+                    {localizeResult.message ? (
+                      <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                        {localizeResult.message}
+                      </p>
+                    ) : null}
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          transcript
+                        </div>
+                        <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-slate-800">
+                          {localizeResult.transcript || "No transcript text is available."}
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          translated text
+                        </div>
+                        <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-slate-800">
+                          {localizeResult.translated_text || "No translated text is available."}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-medium text-slate-950">Synthesized preview</div>
+                          <div className="text-xs text-slate-500">
+                            The worker wraps the TTS waveform as a WAV asset for browser playback.
+                          </div>
+                        </div>
+                        {localizeResult.stages.tts.sample_rate ? (
+                          <div className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700">
+                            {localizeResult.stages.tts.sample_rate} Hz
+                          </div>
+                        ) : null}
+                      </div>
+                      {localizationAudioPreview ? (
+                        <audio className="mt-4 w-full" controls src={localizationAudioPreview}>
+                          <track kind="captions" />
+                        </audio>
+                      ) : (
+                        <p className="mt-4 text-sm text-slate-500">
+                          No preview audio is available for the current run.
+                        </p>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="rounded-xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
+                    Run the localization preview to inspect stage-by-stage transcript,
+                    translation, and synthesized audio output.
                   </div>
                 )}
               </CardContent>

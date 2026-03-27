@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun --bun vite dev",
+    "dev": "bun vite dev --host",
     "build": "bun --bun vite build",
     "start": "bun dist/server/server.js"
   },

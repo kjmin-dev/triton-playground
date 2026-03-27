@@ -9,6 +9,20 @@ from pipeline.stt_contract import (
     WHISPER_TRITON_NOTES,
     WHISPER_TRITON_OUTPUT_SPECS,
 )
+from pipeline.translation_contract import (
+    DEFAULT_TRANSLATION_REPOSITORY_MODEL_NAME,
+    TRANSLATION_TRITON_BACKEND,
+    TRANSLATION_TRITON_INPUT_SPECS,
+    TRANSLATION_TRITON_NOTES,
+    TRANSLATION_TRITON_OUTPUT_SPECS,
+)
+from pipeline.tts_contract import (
+    DEFAULT_TTS_REPOSITORY_MODEL_NAME,
+    TTS_TRITON_BACKEND,
+    TTS_TRITON_INPUT_SPECS,
+    TTS_TRITON_NOTES,
+    TTS_TRITON_OUTPUT_SPECS,
+)
 
 
 AUTO_DOWNLOAD_LANE = "auto-download + auto-serve"
@@ -114,9 +128,12 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         license_name="Apache-2.0",
         approved_for_auto_download=False,
         serve_status=MANUAL_PLANNED_LANE,
-        repository_model_name=None,
-        next_action="Choose a serving backend and resource budget before enabling downloads.",
-        notes="Heavy model, kept out of startup automation until resource limits are locked down.",
+        repository_model_name=DEFAULT_TRANSLATION_REPOSITORY_MODEL_NAME,
+        next_action="Provision the manual MADLAD Triton repository and validate the translation stage in /api/localize.",
+        notes=TRANSLATION_TRITON_NOTES,
+        triton_backend=TRANSLATION_TRITON_BACKEND,
+        triton_inputs=TRANSLATION_TRITON_INPUT_SPECS,
+        triton_outputs=TRANSLATION_TRITON_OUTPUT_SPECS,
     ),
     "cosyvoice3_0_5b": ModelSpec(
         model_id="cosyvoice3_0_5b",
@@ -138,9 +155,12 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         license_name="Apache-2.0",
         approved_for_auto_download=False,
         serve_status=MANUAL_PLANNED_LANE,
-        repository_model_name=None,
-        next_action="Define the low-latency serving contract before enabling downloads.",
-        notes="Manual opt-in only. Streaming backend design is still pending.",
+        repository_model_name=DEFAULT_TTS_REPOSITORY_MODEL_NAME,
+        next_action="Provision the manual Qwen3-TTS Triton repository and validate the preview stage in /api/localize.",
+        notes=TTS_TRITON_NOTES,
+        triton_backend=TTS_TRITON_BACKEND,
+        triton_inputs=TTS_TRITON_INPUT_SPECS,
+        triton_outputs=TTS_TRITON_OUTPUT_SPECS,
     ),
     "bs_roformer": ModelSpec(
         model_id="bs_roformer",
@@ -161,6 +181,12 @@ _CATALOG_MODEL_IDS = tuple(MODEL_CATALOG.keys())
 PROFILE_MODEL_IDS: dict[str, tuple[str, ...]] = {
     "baseline": ("silero_vad",),
     "stt": ("silero_vad", "whisper_large_v3_turbo"),
+    "localize": (
+        "silero_vad",
+        "whisper_large_v3_turbo",
+        "madlad400_3b_mt",
+        "qwen3_tts_0_6b",
+    ),
     "catalog": _CATALOG_MODEL_IDS,
 }
 

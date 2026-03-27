@@ -17,7 +17,7 @@ from pipeline.stt_contract import (
     WHISPER_TASK_INPUT,
     WHISPER_TRANSCRIPT_OUTPUT,
 )
-from pipeline.triton import TritonUnavailableError
+from pipeline.triton import TritonUnavailableError, describe_triton_error
 from pipeline.vad import analyze_vad
 
 
@@ -159,7 +159,9 @@ class TritonWhisperClient:
         try:
             self._client = grpcclient.InferenceServerClient(url=url, verbose=False)
         except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
-            raise TritonUnavailableError(f"Failed to create Triton client for {url}: {exc}") from exc
+            raise TritonUnavailableError(
+                describe_triton_error(url=url, action="Creating the Triton client", exc=exc)
+            ) from exc
 
     def readiness(self) -> TritonReadiness:
         try:
@@ -190,7 +192,9 @@ class TritonWhisperClient:
                 model_name=self._model_name,
             )
         except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
-            raise TritonUnavailableError(f"Failed to query Triton readiness: {exc}") from exc
+            raise TritonUnavailableError(
+                describe_triton_error(url=self._url, action="Querying Triton readiness", exc=exc)
+            ) from exc
 
     def transcribe(
         self,
@@ -236,7 +240,9 @@ class TritonWhisperClient:
                 outputs=[self._grpcclient.InferRequestedOutput(self._transcript_output_name)],
             )
         except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
-            raise TritonUnavailableError(f"Whisper inference request failed: {exc}") from exc
+            raise TritonUnavailableError(
+                describe_triton_error(url=self._url, action="Running Whisper inference", exc=exc)
+            ) from exc
 
         return _decode_transcript_output(result.as_numpy(self._transcript_output_name))
 
