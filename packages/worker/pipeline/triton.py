@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-import numpy as np
+from pipeline.runtime_status import TritonReadiness
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 class TritonUnavailableError(RuntimeError):
@@ -10,19 +16,185 @@ class TritonUnavailableError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class TritonReadiness:
-    server_ready: bool
-    server_live: bool
-    model_ready: bool
+class ModelRepositoryStatus:
     model_name: str
+    root_path: str | None
+    manifest_path: str | None
+    configured: bool
+    manifest_present: bool
+    model_directory_present: bool
+    model_version_present: bool
+    model_artifact_present: bool
+    profile: str | None
+    selected_model_ids: tuple[str, ...]
+    issues: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+    @property
+    def status(self) -> str:
+        if not self.configured:
+            return "not_configured"
+
+        return "ready" if not self.issues else "unavailable"
+
+    @property
+    def ready(self) -> bool:
+        return self.status == "ready"
+
+    @property
+    def summary(self) -> str:
+        if self.status == "not_configured":
+            return "Repository diagnostics are disabled because MODEL_REPOSITORY_ROOT is not set."
+
+        if self.ready:
+            return (
+                f"Model repository at {self.root_path} contains a manifest and artifact for {self.model_name}."
+            )
+
+        return " ".join(self.issues)
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "server_ready": self.server_ready,
-            "server_live": self.server_live,
-            "model_ready": self.model_ready,
+            "status": self.status,
+            "ready": self.ready,
+            "summary": self.summary,
             "model_name": self.model_name,
+            "root_path": self.root_path,
+            "manifest_path": self.manifest_path,
+            "configured": self.configured,
+            "manifest_present": self.manifest_present,
+            "model_directory_present": self.model_directory_present,
+            "model_version_present": self.model_version_present,
+            "model_artifact_present": self.model_artifact_present,
+            "profile": self.profile,
+            "selected_model_ids": list(self.selected_model_ids),
+            "issues": list(self.issues),
+            "warnings": list(self.warnings),
         }
+
+
+def _model_index_entry_name(entry: object) -> str | None:
+    if isinstance(entry, dict):
+        value = entry.get("name")
+        return str(value) if value is not None else None
+
+    value = getattr(entry, "name", None)
+    return str(value) if value is not None else None
+
+
+def _model_index_entry_state(entry: object) -> str | None:
+    if isinstance(entry, dict):
+        value = entry.get("state")
+        return str(value) if value is not None else None
+
+    value = getattr(entry, "state", None)
+    return str(value) if value is not None else None
+
+
+def inspect_model_repository(
+    repository_root: str | None,
+    model_name: str = "silero_vad",
+) -> ModelRepositoryStatus:
+    if not repository_root:
+        return ModelRepositoryStatus(
+            model_name=model_name,
+            root_path=None,
+            manifest_path=None,
+            configured=False,
+            manifest_present=False,
+            model_directory_present=False,
+            model_version_present=False,
+            model_artifact_present=False,
+            profile=None,
+            selected_model_ids=(),
+            issues=(),
+            warnings=("MODEL_REPOSITORY_ROOT is not set.",),
+        )
+
+    root = Path(repository_root)
+    manifest_path = root / "MANIFEST.json"
+    model_directory = root / model_name
+    model_version = model_directory / "1"
+    model_artifact = model_version / "model.onnx"
+    issues: list[str] = []
+    warnings: list[str] = []
+    profile: str | None = None
+    selected_model_ids: tuple[str, ...] = ()
+    manifest_present = manifest_path.is_file()
+
+    if not root.exists():
+        issues.append(f"Model repository root {root} does not exist. Run prepare_models before starting Triton.")
+    elif not root.is_dir():
+        issues.append(f"Model repository root {root} is not a directory.")
+
+    if root.exists() and not manifest_present:
+        issues.append(f"Manifest file {manifest_path} is missing. Run prepare_models to populate the repository.")
+
+    if root.exists() and not model_directory.is_dir():
+        issues.append(f"Model directory {model_directory} is missing.")
+
+    if model_directory.is_dir() and not model_version.is_dir():
+        issues.append(f"Model version directory {model_version} is missing.")
+
+    if model_version.is_dir() and not model_artifact.is_file():
+        issues.append(f"Expected model artifact {model_artifact} is missing.")
+
+    if manifest_present:
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            issues.append(f"Manifest file {manifest_path} is not valid JSON: {exc}")
+        else:
+            profile_value = manifest.get("profile")
+            profile = str(profile_value) if isinstance(profile_value, str) else None
+
+            selected_value = manifest.get("selected_model_ids", [])
+            if isinstance(selected_value, list):
+                selected_model_ids = tuple(str(item) for item in selected_value)
+            else:
+                warnings.append("Manifest selected_model_ids is not a list.")
+
+            if selected_model_ids and model_name not in selected_model_ids:
+                issues.append(
+                    f"Manifest selected_model_ids does not include {model_name}. "
+                    "Run prepare_models with a profile that includes the baseline model."
+                )
+
+            model_records = manifest.get("models", [])
+            if isinstance(model_records, list):
+                record = next(
+                    (
+                        item
+                        for item in model_records
+                        if isinstance(item, dict) and item.get("model_id") == model_name
+                    ),
+                    None,
+                )
+                if record is None:
+                    warnings.append(f"Manifest models does not include a record for {model_name}.")
+                elif record.get("installed") is False:
+                    reason = record.get("reason")
+                    if isinstance(reason, str) and reason:
+                        issues.append(f"Manifest marks {model_name} as not installed: {reason}")
+                    else:
+                        issues.append(f"Manifest marks {model_name} as not installed.")
+            else:
+                warnings.append("Manifest models field is not a list.")
+
+    return ModelRepositoryStatus(
+        model_name=model_name,
+        root_path=str(root),
+        manifest_path=str(manifest_path),
+        configured=True,
+        manifest_present=manifest_present,
+        model_directory_present=model_directory.is_dir(),
+        model_version_present=model_version.is_dir(),
+        model_artifact_present=model_artifact.is_file(),
+        profile=profile,
+        selected_model_ids=selected_model_ids,
+        issues=tuple(issues),
+        warnings=tuple(warnings),
+    )
 
 
 class TritonVadClient:
@@ -33,6 +205,7 @@ class TritonVadClient:
             raise TritonUnavailableError("tritonclient[grpc] is not installed.") from exc
 
         self._grpcclient = grpcclient
+        self._url = url
         self._model_name = model_name
 
         try:
@@ -42,16 +215,42 @@ class TritonVadClient:
 
     def readiness(self) -> TritonReadiness:
         try:
-            return TritonReadiness(
+            model_present: bool | None = None
+            model_state: str | None = None
+            get_model_repository_index = getattr(self._client, "get_model_repository_index", None)
+            if callable(get_model_repository_index):
+                try:
+                    model_index = get_model_repository_index()
+                except Exception:
+                    model_index = None
+
+                if model_index is not None:
+                    model_present = False
+                    for entry in model_index:
+                        if _model_index_entry_name(entry) == self._model_name:
+                            model_present = True
+                            model_state = _model_index_entry_state(entry)
+                            break
+
+            return TritonReadiness.from_status(
+                server_url=self._url,
                 server_ready=bool(self._client.is_server_ready()),
                 server_live=bool(self._client.is_server_live()),
                 model_ready=bool(self._client.is_model_ready(self._model_name)),
+                model_present=model_present,
+                model_state=model_state,
                 model_name=self._model_name,
             )
         except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
             raise TritonUnavailableError(f"Failed to query Triton readiness: {exc}") from exc
 
-    def score_windows(self, windows: np.ndarray) -> list[float]:
+    def score_windows(self, windows: "np.ndarray") -> list[float]:
+        readiness = self.readiness()
+        if not readiness.ready:
+            raise TritonUnavailableError(readiness.summary)
+
+        import numpy as np
+
         state = np.zeros((2, 1, 128), dtype=np.float32)
         probabilities: list[float] = []
 

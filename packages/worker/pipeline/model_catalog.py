@@ -3,6 +3,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 
+AUTO_DOWNLOAD_LANE = "auto-download + auto-serve"
+MANUAL_PLANNED_LANE = "manual-download + planned-serve"
+HOLD_LANE = "hold"
+VALID_SERVE_STATUSES = (AUTO_DOWNLOAD_LANE, MANUAL_PLANNED_LANE, HOLD_LANE)
+
+
 @dataclass(frozen=True)
 class ModelArtifact:
     hf_path: str
@@ -20,8 +26,30 @@ class ModelSpec:
     approved_for_auto_download: bool
     serve_status: str
     repository_model_name: str | None
+    next_action: str
     notes: str
     artifacts: tuple[ModelArtifact, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.serve_status not in VALID_SERVE_STATUSES:
+            raise ValueError(f"Unknown serve status for {self.model_id}: {self.serve_status}")
+
+        if self.serve_status == AUTO_DOWNLOAD_LANE:
+            if not self.approved_for_auto_download:
+                raise ValueError(f"{self.model_id} must be approved for auto download in the auto lane")
+            if self.hf_repo_id is None or self.revision is None or self.repository_model_name is None:
+                raise ValueError(f"{self.model_id} is missing required auto-download metadata")
+            if not self.artifacts:
+                raise ValueError(f"{self.model_id} must declare at least one artifact in the auto lane")
+
+        if self.serve_status == MANUAL_PLANNED_LANE:
+            if self.approved_for_auto_download:
+                raise ValueError(f"{self.model_id} cannot be auto-approved in the manual lane")
+            if self.hf_repo_id is None or self.revision is None:
+                raise ValueError(f"{self.model_id} must pin upstream provenance in the manual lane")
+
+        if self.serve_status == HOLD_LANE and self.approved_for_auto_download:
+            raise ValueError(f"{self.model_id} cannot be auto-approved while on hold")
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
@@ -37,8 +65,9 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         revision="730bca06348210595fb8cc15f28538707e58abbb",
         license_name="MIT",
         approved_for_auto_download=True,
-        serve_status="triton-ready",
+        serve_status=AUTO_DOWNLOAD_LANE,
         repository_model_name="silero_vad",
+        next_action="None; keep revision and checksum pinned while maintaining the baseline path.",
         notes="Pinned ONNX artifact for the baseline Triton happy path.",
         artifacts=(
             ModelArtifact(
@@ -55,9 +84,10 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         revision="f1baaf0c070fd03fc67d773bebeff75023422b6d",
         license_name="MIT",
         approved_for_auto_download=False,
-        serve_status="planned",
+        serve_status=MANUAL_PLANNED_LANE,
         repository_model_name=None,
-        notes="Approved for manual download only until the Triton backend strategy is finalized.",
+        next_action="Finalize the Whisper serving backend and opt-in materialization path in Stream C.",
+        notes="Pinned upstream source, but kept out of automatic startup until the backend contract is fixed.",
     ),
     "madlad400_3b_mt": ModelSpec(
         model_id="madlad400_3b_mt",
@@ -66,8 +96,9 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         revision="main",
         license_name="Apache-2.0",
         approved_for_auto_download=False,
-        serve_status="planned",
+        serve_status=MANUAL_PLANNED_LANE,
         repository_model_name=None,
+        next_action="Choose a serving backend and resource budget before enabling downloads.",
         notes="Heavy model, kept out of startup automation until resource limits are locked down.",
     ),
     "cosyvoice3_0_5b": ModelSpec(
@@ -77,8 +108,9 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         revision="main",
         license_name="Apache-2.0",
         approved_for_auto_download=False,
-        serve_status="planned",
+        serve_status=MANUAL_PLANNED_LANE,
         repository_model_name=None,
+        next_action="Define the voice-cloning policy and streaming backend contract before enabling downloads.",
         notes="Manual opt-in until the voice cloning policy and backend contract are in place.",
     ),
     "qwen3_tts_0_6b": ModelSpec(
@@ -88,8 +120,9 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         revision="main",
         license_name="Apache-2.0",
         approved_for_auto_download=False,
-        serve_status="planned",
+        serve_status=MANUAL_PLANNED_LANE,
         repository_model_name=None,
+        next_action="Define the low-latency serving contract before enabling downloads.",
         notes="Manual opt-in only. Streaming backend design is still pending.",
     ),
     "bs_roformer": ModelSpec(
@@ -99,15 +132,19 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         revision=None,
         license_name="Pending provenance review",
         approved_for_auto_download=False,
-        serve_status="hold",
+        serve_status=HOLD_LANE,
         repository_model_name=None,
+        next_action="Pin the exact redistributable weight source and review provenance before any download.",
         notes="Do not auto-download until the exact redistributable weight source is pinned and reviewed.",
     ),
 }
 
+_CATALOG_MODEL_IDS = tuple(MODEL_CATALOG.keys())
+
 PROFILE_MODEL_IDS: dict[str, tuple[str, ...]] = {
     "baseline": ("silero_vad",),
-    "catalog": (),
+    "stt": ("silero_vad", "whisper_large_v3_turbo"),
+    "catalog": _CATALOG_MODEL_IDS,
 }
 
 

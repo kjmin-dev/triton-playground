@@ -4,10 +4,16 @@ import os
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from pipeline.audio import UnsupportedAudioError, decode_wav, resample_audio
 from pipeline.model_catalog import get_profile_model_ids, list_model_specs
-from pipeline.triton import TritonUnavailableError, TritonVadClient
+from pipeline.runtime_status import TritonReadiness, build_ready_payload
+from pipeline.triton import (
+    TritonUnavailableError,
+    TritonVadClient,
+    inspect_model_repository,
+)
 from pipeline.vad import analyze_vad
 
 app = FastAPI(title="Triton Playground Worker")
@@ -28,12 +34,17 @@ def _model_profile() -> str:
     return os.getenv("MODEL_PROFILE", "baseline")
 
 
+def _model_repository_root() -> str | None:
+    return os.getenv("MODEL_REPOSITORY_ROOT")
+
+
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
         "profile": _model_profile(),
         "triton_grpc_url": _triton_grpc_url(),
+        "model_repository_root": _model_repository_root(),
     }
 
 
@@ -48,16 +59,26 @@ async def models():
 
 @app.get("/api/ready")
 async def ready():
+    repository_status = inspect_model_repository(
+        repository_root=_model_repository_root(),
+        model_name="silero_vad",
+    )
+
     try:
         readiness = TritonVadClient(url=_triton_grpc_url()).readiness()
     except TritonUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        readiness = TritonReadiness.from_error(
+            server_url=_triton_grpc_url(),
+            model_name="silero_vad",
+            issue=str(exc),
+        )
+        payload = build_ready_payload(_model_profile(), readiness)
+        payload["repository"] = repository_status.to_dict()
+        return JSONResponse(status_code=503, content=payload)
 
-    return {
-        "status": "ok",
-        "profile": _model_profile(),
-        "triton": readiness.to_dict(),
-    }
+    payload = build_ready_payload(_model_profile(), readiness)
+    payload["repository"] = repository_status.to_dict()
+    return JSONResponse(status_code=200 if readiness.ready else 503, content=payload)
 
 
 @app.post("/api/tts")

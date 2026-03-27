@@ -36,6 +36,18 @@ services:
               count: all
               capabilities: [gpu]
     shm_size: "2g"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/v2/health/ready').status == 200 else 1)"
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     depends_on:
       model-init:
         condition: service_completed_successfully
@@ -49,8 +61,12 @@ services:
     environment:
       - TRITON_GRPC_URL=triton:8001
       - MODEL_PROFILE=baseline
+      - MODEL_REPOSITORY_ROOT=/models
+    volumes:
+      - ./model_repository:/models:ro
     depends_on:
-      - triton
+      triton:
+        condition: service_healthy
 
   web:
     build:

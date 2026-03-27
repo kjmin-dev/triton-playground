@@ -14,16 +14,17 @@ Future stages keep the same download and provenance policy for STT, translation,
 
 ## Target Models
 
-| Stage | Model | License | Auto-download | Serve status |
-|-------|-------|---------|---------------|--------------|
-| Separation | BS-RoFormer | code MIT, weights pending provenance review | No | Hold |
-| VAD | Silero VAD | MIT | Yes | Triton happy path complete |
-| STT | Whisper large-v3-turbo | MIT | Manual opt-in | Planned |
-| Translation | MADLAD-400 3B | Apache 2.0 | Manual opt-in | Planned |
-| TTS | CosyVoice3-0.5B | Apache 2.0 | Manual opt-in | Planned |
-| TTS | Qwen3-TTS-0.6B | Apache 2.0 | Manual opt-in | Planned |
+| Stage | Model | License | Governance lane | Next action |
+|-------|-------|---------|-----------------|-------------|
+| Separation | BS-RoFormer | code MIT, weights pending provenance review | Hold | Pin the exact redistributable weight source and review provenance. |
+| VAD | Silero VAD | MIT | Auto-download + auto-serve | Keep the baseline path pinned and runnable. |
+| STT | Whisper large-v3-turbo | MIT | Manual-download + planned-serve | Finalize the Whisper backend contract in Stream C. |
+| Translation | MADLAD-400 3B | Apache 2.0 | Manual-download + planned-serve | Choose a serving backend and resource budget. |
+| TTS | CosyVoice3-0.5B | Apache 2.0 | Manual-download + planned-serve | Define the voice-cloning policy and streaming backend contract. |
+| TTS | Qwen3-TTS-0.6B | Apache 2.0 | Manual-download + planned-serve | Define the low-latency serving contract. |
 
-Only approved models can enter the runtime download lane. The default `baseline` profile downloads `silero_vad` only.
+Only models in the `auto-download + auto-serve` lane can enter runtime download automation. The default `baseline` profile downloads `silero_vad` only.
+The `stt` profile records `silero_vad` plus the Whisper metadata for planning, and `catalog` emits the full catalog without changing the baseline runtime behavior.
 
 Detailed governance and startup design: [`docs/model-governance.md`](docs/model-governance.md)
 
@@ -31,15 +32,28 @@ Detailed governance and startup design: [`docs/model-governance.md`](docs/model-
 
 ```sh
 bun install
-cp .env.example .env
 bun run prepare:models
-bun run dev:worker
+docker compose up --build
 ```
 
-The worker expects Triton at `localhost:8001`. For the full happy path with GPU:
+`bun install` runs `scripts/setup.sh`, which installs the pinned moon Python/uv toolchains, updates your shell PATH for proto shims, and bootstraps + syncs `packages/worker/.venv` with Python `3.10.12`.
+
+To inspect the policy catalog without changing the baseline runtime set:
 
 ```sh
-docker compose up --build
+bun run prepare:models --profile catalog
+```
+
+To stage the Whisper planning manifest without enabling automatic download:
+
+```sh
+bun run prepare:models --profile stt
+```
+
+For local worker development against an already-running Triton instance:
+
+```sh
+TRITON_GRPC_URL=localhost:8001 MODEL_REPOSITORY_ROOT=model_repository bun run dev:worker
 ```
 
 Open:
@@ -73,6 +87,22 @@ Example:
 curl -X POST "http://localhost:8080/api/vad?threshold=0.5" \
   -F "file=@sample.wav"
 ```
+
+## Smoke Test
+
+Use this after `docker compose up --build` to confirm the baseline runtime path:
+
+```sh
+curl -s http://localhost:8080/api/ready
+curl -s -X POST "http://localhost:8080/api/vad?threshold=0.5" \
+  -F "file=@sample.wav"
+```
+
+Expected behavior:
+
+- `/api/ready` returns `200` with `"status": "ready"` when Triton and `silero_vad` are ready
+- `/api/ready` returns `503` with diagnostic `triton.summary`, `triton.issues`, and `repository.*` details when Triton is unreachable or the model failed to load
+- `/api/vad` returns speech segments only after the readiness check is healthy
 
 ## Scripts
 

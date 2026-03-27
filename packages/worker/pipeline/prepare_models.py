@@ -12,9 +12,18 @@ from urllib.parse import quote
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from pipeline.model_catalog import ModelArtifact, ModelSpec, get_model_spec, get_profile_model_ids
+from pipeline.model_catalog import (
+    AUTO_DOWNLOAD_LANE,
+    HOLD_LANE,
+    MANUAL_PLANNED_LANE,
+    ModelArtifact,
+    ModelSpec,
+    get_model_spec,
+    get_profile_model_ids,
+)
 
 DownloadFn = Callable[[ModelSpec, ModelArtifact, Path | None], Path]
+MANIFEST_SCHEMA_VERSION = 2
 
 
 class ModelPreparationError(RuntimeError):
@@ -69,6 +78,16 @@ def _verify_sha256(path: Path, expected_sha256: str | None) -> None:
         )
 
 
+def _skip_reason(spec: ModelSpec) -> str:
+    if spec.serve_status == MANUAL_PLANNED_LANE:
+        return "model is cataloged for manual download and planned serving"
+
+    if spec.serve_status == HOLD_LANE:
+        return "model is on hold pending provenance review"
+
+    return "model is not approved for automatic download"
+
+
 def _prepare_triton_model(
     output_root: Path,
     spec: ModelSpec,
@@ -112,7 +131,13 @@ def prepare_model_repository(
     output_root.mkdir(parents=True, exist_ok=True)
 
     manifest: dict[str, object] = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "policy": {
+            "baseline_profile": "baseline",
+            "planning_profiles": ["stt", "catalog"],
+            "allowed_serve_statuses": [AUTO_DOWNLOAD_LANE, MANUAL_PLANNED_LANE, HOLD_LANE],
+        },
         "models": [],
     }
 
@@ -122,15 +147,14 @@ def prepare_model_repository(
 
         if not spec.approved_for_auto_download:
             record["installed"] = False
-            record["reason"] = "model is not approved for automatic download"
+            record["reason"] = _skip_reason(spec)
             manifest["models"].append(record)
             continue
 
-        if spec.serve_status != "triton-ready":
-            record["installed"] = False
-            record["reason"] = "model is approved for download but not wired into Triton startup"
-            manifest["models"].append(record)
-            continue
+        if spec.serve_status != AUTO_DOWNLOAD_LANE:
+            raise ModelPreparationError(
+                f"{spec.model_id} is marked for automatic download but is not in the auto-serve lane"
+            )
 
         install_record = _prepare_triton_model(output_root, spec, cache_dir, downloader)
         record.update(install_record)

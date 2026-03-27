@@ -9,11 +9,11 @@
     "dev:worker": "moon run worker:dev",
     "build": "moon run :build",
     "build:web": "moon run web:build",
-    "prepare:models": "PYTHONPATH=packages/worker python3 -m pipeline.prepare_models --profile baseline --output-root model_repository",
+    "prepare:models": "moon run worker:prepare-models",
     "lint": "moon run :lint",
     "format": "moon run :format",
-    "test:worker": "python3 -m unittest discover -s packages/worker/tests",
-    "check": "bun run build && python3 -m compileall packages/worker && bun run test:worker"
+    "test:worker": "moon run worker:test",
+    "check": "moon run web:build worker:compile worker:test"
   },
   "devDependencies": {
     "@moonrepo/cli": "^2.1.3",

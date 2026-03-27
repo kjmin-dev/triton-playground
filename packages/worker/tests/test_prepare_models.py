@@ -34,7 +34,11 @@ class PrepareModelsTest(unittest.TestCase):
     def test_manifest_is_written(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_root = Path(temp_dir)
-            manifest = {"models": [{"model_id": "silero_vad", "installed": False, "sha256": SILERO_SHA256}]}
+            manifest = {
+                "schema_version": 2,
+                "policy": {"baseline_profile": "baseline"},
+                "models": [{"model_id": "silero_vad", "installed": False, "sha256": SILERO_SHA256}],
+            }
             manifest_path = write_manifest(output_root, manifest)
 
             self.assertTrue(manifest_path.exists())

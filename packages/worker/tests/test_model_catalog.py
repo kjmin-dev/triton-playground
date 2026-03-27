@@ -12,9 +12,13 @@ from pipeline.model_catalog import get_profile_model_ids, list_model_specs
 class ModelCatalogTest(unittest.TestCase):
     def test_baseline_profile_only_contains_auto_download_models(self) -> None:
         baseline_ids = get_profile_model_ids("baseline")
+        stt_ids = get_profile_model_ids("stt")
+        catalog_ids = get_profile_model_ids("catalog")
         specs = {spec.model_id: spec for spec in list_model_specs()}
 
         self.assertEqual(baseline_ids, ("silero_vad",))
+        self.assertEqual(stt_ids, ("silero_vad", "whisper_large_v3_turbo"))
+        self.assertIn("bs_roformer", catalog_ids)
         for model_id in baseline_ids:
             self.assertTrue(specs[model_id].approved_for_auto_download)
 
@@ -22,6 +26,7 @@ class ModelCatalogTest(unittest.TestCase):
         specs = {spec.model_id: spec for spec in list_model_specs()}
         self.assertFalse(specs["bs_roformer"].approved_for_auto_download)
         self.assertEqual(specs["bs_roformer"].serve_status, "hold")
+        self.assertTrue(specs["bs_roformer"].next_action.startswith("Pin the exact redistributable weight source"))
 
 
 if __name__ == "__main__":

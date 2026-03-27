@@ -4,7 +4,7 @@
 
 Keep model download and server startup compliant by default.
 
-The repo therefore separates models into three lanes:
+The repo separates models into three lanes:
 
 1. `auto-download + auto-serve`
 2. `manual-download + planned-serve`
@@ -12,26 +12,58 @@ The repo therefore separates models into three lanes:
 
 Only lane 1 participates in startup automation.
 
-## Policy
+## Approval Criteria
 
-1. Only download from an explicit allowlist in source control.
-2. Pin every approved artifact to an immutable upstream revision.
-3. Record the upstream repository, revision, license, and SHA256 in the generated manifest.
+A model can enter the catalog only if the source is explicit and the artifact path is bounded.
+
+1. Pin the upstream repository and immutable revision in source control.
+2. Record the upstream license and the exact artifact SHA256 when the artifact is meant to be materialized.
+3. Keep `trust_remote_code` out of the baseline path.
 4. Do not auto-download gated, token-required, or provenance-unclear weights.
-5. Do not rely on random community conversions in the auto-serve lane unless redistribution and provenance are explicitly captured.
-6. Keep `trust_remote_code` out of the baseline path.
-7. Make heavyweight models opt-in so `docker compose up` stays predictable.
+5. Put heavyweight models in `manual-download + planned-serve` until their backend, VRAM, and startup contract are explicit.
+6. Put models in `hold` when the weight source itself is not yet defensible.
+
+## State Machine
+
+The state machine is intentionally small:
+
+- `auto-download + auto-serve`
+  - eligible for `prepare_models`
+  - must have pinned upstream revision, repository model name, and at least one checked artifact
+  - must keep `approved_for_auto_download=true`
+- `manual-download + planned-serve`
+  - cataloged and reviewable
+  - may be referenced by later streams, but is not installed by the automatic baseline materializer
+  - must keep a pinned upstream repository and revision
+- `hold`
+  - catalog only
+  - no automatic download path
+  - requires an explicit provenance decision before promotion
+
+## Profiles
+
+The worker materializer supports these profiles:
+
+- `baseline`
+  - `silero_vad` only
+  - keeps `docker compose up` predictable
+- `stt`
+  - `silero_vad` plus Whisper metadata
+  - useful when Stream C needs a planning manifest without changing the runtime baseline
+- `catalog`
+  - the full catalog
+  - emits the policy inventory and audit trail without widening automatic download behavior
 
 ## Current Catalog
 
-| ID | Upstream | License | Lane | Notes |
-|----|----------|---------|------|-------|
-| `silero_vad` | `onnx-community/silero-vad` | MIT | auto-download + auto-serve | Triton ONNX happy path |
-| `whisper_large_v3_turbo` | `openai/whisper-large-v3-turbo` | MIT | manual-download + planned-serve | likely Triton Python backend or TensorRT-LLM conversion |
-| `madlad400_3b_mt` | `google/madlad400-3b-mt` | Apache 2.0 | manual-download + planned-serve | translation stage |
-| `cosyvoice3_0_5b` | `FunAudioLLM/Fun-CosyVoice3-0.5B-2512` | Apache 2.0 | manual-download + planned-serve | TTS stage |
-| `qwen3_tts_0_6b` | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | Apache 2.0 | manual-download + planned-serve | low-latency TTS stage |
-| `bs_roformer` | pending weight provenance review | pending | hold | do not auto-download yet |
+| ID | Upstream | License | Lane | Next action |
+|----|----------|---------|------|-------------|
+| `silero_vad` | `onnx-community/silero-vad` | MIT | `auto-download + auto-serve` | Keep the baseline path pinned and runnable. |
+| `whisper_large_v3_turbo` | `openai/whisper-large-v3-turbo` | MIT | `manual-download + planned-serve` | Finalize the Whisper serving backend and opt-in path in Stream C. |
+| `madlad400_3b_mt` | `google/madlad400-3b-mt` | Apache 2.0 | `manual-download + planned-serve` | Choose a serving backend and resource budget. |
+| `cosyvoice3_0_5b` | `FunAudioLLM/Fun-CosyVoice3-0.5B-2512` | Apache 2.0 | `manual-download + planned-serve` | Define the voice-cloning policy and streaming contract. |
+| `qwen3_tts_0_6b` | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | Apache 2.0 | `manual-download + planned-serve` | Define the low-latency serving contract. |
+| `bs_roformer` | pending weight provenance review | pending | `hold` | Pin the exact redistributable weight source and review provenance. |
 
 ## Startup Sequence
 
@@ -53,6 +85,8 @@ This writes:
 - `/models/silero_vad/1/model.onnx`
 - `/models/MANIFEST.json`
 
+The manifest now includes the selected profile, the policy lane state machine, and the next action for each catalog entry.
+
 ## Why the Baseline Is Silero VAD
 
 - permissive MIT license
@@ -65,10 +99,10 @@ This writes:
 
 - `Whisper large-v3-turbo`
   - keep auto-download off
-  - decide between TensorRT-LLM conversion and Triton Python backend after benchmarking VRAM and latency
+  - Stream C can build against the manual-download catalog entry without reopening governance
 - `MADLAD-400 3B`
   - likely Triton Python backend first
 - `CosyVoice3` and `Qwen3-TTS`
   - require separate streaming contracts and voice asset policy before enabling auto-serve
 - `BS-RoFormer`
-  - keep on hold until the exact redistributable weight source is pinned and reviewed
+  - remain on hold until the exact redistributable weight source is pinned and reviewed
