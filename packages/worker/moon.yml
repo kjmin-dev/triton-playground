@@ -12,7 +12,7 @@ tasks:
       cache: false
       persistent: true
   prepare-models:
-    command: PYTHONPATH=. .venv/bin/python -m pipeline.prepare_models --profile baseline --output-root ../../model_repository
+    command: PYTHONPATH=. .venv/bin/python -m pipeline.prepare_models --output-root ../../model_repository
   prepare-localize:
     command: PYTHONPATH=. .venv/bin/python -m pipeline.prepare_models --profile localize --materialize-manual-models --output-root ../../model_repository
   download-weights:

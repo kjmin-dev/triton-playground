@@ -142,7 +142,7 @@ const STT_LANGUAGE_OPTIONS = [
 const TARGET_LANGUAGE_OPTIONS = STT_LANGUAGE_OPTIONS.filter((o) => o.value !== "auto");
 
 const SCORE_LIMIT = 80;
-const MAX_BYTES = 25 * 1024 * 1024;
+const MAX_BYTES = 150 * 1024 * 1024;
 
 const MODES: Array<{
   value: DemoMode;
@@ -155,10 +155,10 @@ const MODES: Array<{
   { value: "stt", label: "STT", icon: MicVocal, action: "Run STT", running: "Running STT\u2026" },
   {
     value: "localize",
-    label: "Localize",
+    label: "Voice Dub",
     icon: Sparkles,
-    action: "Run Localize",
-    running: "Running\u2026",
+    action: "Run Voice Dub",
+    running: "Dubbing\u2026",
   },
 ];
 
@@ -213,12 +213,29 @@ function Home() {
   const live = Boolean(ready?.triton.server_ready && ready?.triton.model_ready);
   const cfg = MODES.find((m) => m.value === mode) ?? MODES[0];
 
+  const [dragging, setDragging] = React.useState(false);
+
+  const originalAudioUrl = React.useMemo(
+    () => (file ? URL.createObjectURL(file) : null),
+    [file],
+  );
+  React.useEffect(() => {
+    return () => { if (originalAudioUrl) URL.revokeObjectURL(originalAudioUrl); };
+  }, [originalAudioUrl]);
+
   const audioSrc =
     loc?.stages.tts.audio_base64 && loc.stages.tts.content_type
       ? `data:${loc.stages.tts.content_type};base64,${loc.stages.tts.audio_base64}`
       : null;
   const scores = vad?.window_scores.slice(0, SCORE_LIMIT) ?? [];
   const speechWins = vad && thrOk ? vad.window_scores.filter((s) => s >= thr).length : 0;
+
+  function handleFileDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragging(false);
+    const dropped = e.dataTransfer.files[0];
+    if (dropped) { setFile(dropped); setError(null); }
+  }
 
   React.useEffect(() => {
     let off = false;
@@ -312,7 +329,7 @@ function Home() {
         </p>
         <p className="mt-1 text-sm leading-relaxed text-slate-400">
           Upload a WAV file, pick a mode, and run inference.
-          VAD detects speech, STT transcribes it, Localize translates and synthesizes in one pass.
+          VAD detects speech, STT transcribes it, Voice Dub translates and re-voices in one pass.
         </p>
       </div>
 
@@ -324,17 +341,29 @@ function Home() {
           void run(mode);
         }}
       >
-        {/* Upload */}
-        <label className="flex cursor-pointer items-center gap-3 rounded-xl border border-dashed border-slate-300 bg-white/70 px-4 py-3 backdrop-blur transition hover:border-slate-400 hover:bg-white/90">
-          <div className="rounded-lg bg-slate-100 p-2">
-            <Upload className="h-4 w-4 text-slate-500" />
+        {/* Upload (click or drag & drop) */}
+        <label
+          className={`flex cursor-pointer items-center gap-3 rounded-xl border-2 border-dashed px-4 py-5 backdrop-blur transition ${
+            dragging
+              ? "border-cyan-400 bg-cyan-50/80"
+              : file
+                ? "border-emerald-300 bg-emerald-50/50 hover:border-emerald-400"
+                : "border-slate-300 bg-white/70 hover:border-slate-400 hover:bg-white/90"
+          }`}
+          onDragEnter={(e) => { e.preventDefault(); setDragging(true); }}
+          onDragLeave={(e) => { e.preventDefault(); setDragging(false); }}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={handleFileDrop}
+        >
+          <div className={`rounded-lg p-2 ${dragging ? "bg-cyan-100" : "bg-slate-100"}`}>
+            <Upload className={`h-4 w-4 ${dragging ? "text-cyan-600" : "text-slate-500"}`} />
           </div>
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-medium text-slate-900">
-              {file ? file.name : "Upload WAV"}
+              {dragging ? "Drop audio file here" : file ? file.name : "Upload audio file"}
             </div>
             <div className="text-xs text-slate-500">
-              {file ? fmtBytes(file.size) : `PCM WAV \u00b7 max ${fmtBytes(MAX_BYTES)}`}
+              {file ? fmtBytes(file.size) : `Drag & drop or click \u00b7 WAV \u00b7 max ${fmtBytes(MAX_BYTES)}`}
             </div>
           </div>
           {file && (
@@ -518,7 +547,7 @@ function Home() {
               ) : null}
             </TabsTrigger>
             <TabsTrigger value="localize">
-              Localize
+              Voice Dub
               {loc ? (
                 <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
               ) : null}
@@ -678,17 +707,33 @@ function Home() {
                     tone={loc.status === "ok" ? "ready" : "warning"}
                     value={loc.status}
                   />
-                  <Metric label="Duration" value={fmtMs(loc.duration_ms)} />
+                  <Metric label="Total" value={fmtMs((loc as Record<string, unknown>).elapsed_ms as number | undefined)} />
                 </div>
 
                 <div className="grid gap-2 sm:grid-cols-3">
-                  <Stage label="STT" model={loc.models.stt} status={loc.stages.stt.status} />
+                  <Stage
+                    label="STT"
+                    model={loc.models.stt}
+                    status={loc.stages.stt.status}
+                    elapsed={(loc.stages.stt as Record<string, unknown>).elapsed_ms as number | undefined}
+                  />
                   <Stage
                     label="Translation"
                     model={loc.models.translation}
                     status={loc.stages.translation.status}
+                    elapsed={(loc.stages.translation as Record<string, unknown>).elapsed_ms as number | undefined}
                   />
-                  <Stage label="TTS" model={loc.models.tts} status={loc.stages.tts.status} />
+                  <Stage
+                    label="TTS"
+                    model={loc.models.tts}
+                    status={loc.stages.tts.status}
+                    elapsed={(loc.stages.tts as Record<string, unknown>).elapsed_ms as number | undefined}
+                    detail={
+                      (loc.stages.tts as Record<string, unknown>).voice_cloning
+                        ? `VC: ${(loc.stages.tts as Record<string, unknown>).voice_cloning_mode}`
+                        : undefined
+                    }
+                  />
                 </div>
 
                 {loc.message && (
@@ -716,26 +761,54 @@ function Home() {
                   </div>
                 </div>
 
-                <div>
-                  <div className="mb-2 flex items-center justify-between">
-                    <h3 className="text-sm font-medium text-slate-900">Preview audio</h3>
-                    {loc.stages.tts.sample_rate && (
-                      <span className="text-xs text-slate-500">
-                        {loc.stages.tts.sample_rate} Hz
-                      </span>
-                    )}
-                  </div>
-                  {audioSrc ? (
-                    <audio className="w-full" controls src={audioSrc} />
-                  ) : (
-                    <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
-                      No audio preview available.
+                {/* Audio comparison */}
+                <div className="space-y-3">
+                  <h3 className="text-sm font-medium text-slate-900">Audio Comparison</h3>
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    {/* Original */}
+                    <div className="rounded-lg border border-slate-200 bg-white p-4">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="text-sm font-medium text-slate-700">Original</span>
+                        <span className="text-xs text-slate-500">
+                          {langLabel(loc.source_language)} &middot; {fmtMs(loc.duration_ms)}
+                        </span>
+                      </div>
+                      {originalAudioUrl ? (
+                        <audio className="w-full" controls src={originalAudioUrl} />
+                      ) : (
+                        <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-center text-xs text-slate-400">
+                          Upload another file to compare
+                        </div>
+                      )}
                     </div>
-                  )}
+                    {/* Synthesized */}
+                    <div className={`rounded-lg border p-4 ${audioSrc ? "border-cyan-200 bg-cyan-50/50" : "border-slate-200 bg-white"}`}>
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="text-sm font-medium text-slate-700">
+                          Dubbed
+                          {(loc.stages.tts as Record<string, unknown>).voice_cloning && (
+                            <span className="ml-1.5 rounded-full bg-cyan-100 px-1.5 py-0.5 text-xs text-cyan-700">VC</span>
+                          )}
+                        </span>
+                        <span className="text-xs text-slate-500">
+                          {langLabel(loc.target_language)}
+                          {loc.stages.tts.sample_rate ? ` \u00b7 ${loc.stages.tts.sample_rate} Hz` : ""}
+                          {loc.stages.tts.duration_ms ? ` \u00b7 ${fmtMs(loc.stages.tts.duration_ms)}` : ""}
+                        </span>
+                      </div>
+                      {audioSrc ? (
+                        <audio className="w-full" controls src={audioSrc} />
+                      ) : (
+                        <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-center text-xs text-slate-400">
+                          {loc.stages.tts.message ?? loc.stages.tts.reason ?? "No audio preview available"}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
             ) : (
-              <EmptyState>Run Localize for end-to-end speech translation.</EmptyState>
+              <EmptyState>Run Voice Dub for end-to-end speech translation with voice cloning.</EmptyState>
             )}
           </TabsContent>
         </Tabs>
@@ -805,10 +878,14 @@ function Stage({
   label,
   model,
   status,
+  elapsed,
+  detail,
 }: {
   label: string;
   model: string;
   status: string;
+  elapsed?: number;
+  detail?: string;
 }) {
   const ok = status === "ok";
   return (
@@ -817,11 +894,21 @@ function Stage({
     >
       <div className="flex items-center justify-between">
         <span className="text-sm font-medium text-slate-950">{label}</span>
-        <span className={`text-xs font-medium ${ok ? "text-emerald-700" : "text-slate-500"}`}>
-          {status}
-        </span>
+        <div className="flex items-center gap-2">
+          {elapsed != null && (
+            <span className="text-xs tabular-nums text-slate-400">{fmtMs(elapsed)}</span>
+          )}
+          <span className={`text-xs font-medium ${ok ? "text-emerald-700" : "text-slate-500"}`}>
+            {status}
+          </span>
+        </div>
       </div>
-      <div className="mt-1 truncate text-xs text-slate-500">{model}</div>
+      <div className="mt-1 flex items-center gap-2">
+        <span className="truncate text-xs text-slate-500">{model}</span>
+        {detail && (
+          <span className="shrink-0 rounded-full bg-cyan-100 px-1.5 py-0.5 text-xs text-cyan-700">{detail}</span>
+        )}
+      </div>
     </div>
   );
 }
