@@ -50,3 +50,7 @@ venv/
 # moon
 .moon/cache
 .moon/docker
+
+# runtime model repository
+model_repository/*
+!model_repository/.gitkeep

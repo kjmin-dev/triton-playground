@@ -1,10 +1,19 @@
 {
   "name": "triton-playground",
-  "module": "index.ts",
   "type": "module",
   "private": true,
   "scripts": {
-    "postinstall": "bash scripts/setup.sh"
+    "postinstall": "bash scripts/setup.sh",
+    "dev": "moon run :dev",
+    "dev:web": "moon run web:dev",
+    "dev:worker": "moon run worker:dev",
+    "build": "moon run :build",
+    "build:web": "moon run web:build",
+    "prepare:models": "PYTHONPATH=packages/worker python3 -m pipeline.prepare_models --profile baseline --output-root model_repository",
+    "lint": "moon run :lint",
+    "format": "moon run :format",
+    "test:worker": "python3 -m unittest discover -s packages/worker/tests",
+    "check": "bun run build && python3 -m compileall packages/worker && bun run test:worker"
   },
   "devDependencies": {
     "@moonrepo/cli": "^2.1.3",

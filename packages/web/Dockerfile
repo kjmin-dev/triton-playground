@@ -9,5 +9,7 @@ RUN bun --bun run build
 
 FROM oven/bun:1
 WORKDIR /app
-COPY --from=build /app/.output .output
-CMD ["bun", "run", ".output/server/index.mjs"]
+COPY packages/web/package.json packages/web/bun.lock* ./
+RUN bun install --frozen-lockfile --production
+COPY --from=build /app/dist ./dist
+CMD ["bun", "dist/server/server.js"]

@@ -1,4 +1,24 @@
 services:
+  model-init:
+    build:
+      context: .
+      dockerfile: packages/worker/Dockerfile
+    command:
+      [
+        "python",
+        "-m",
+        "pipeline.prepare_models",
+        "--profile",
+        "baseline",
+        "--output-root",
+        "/models"
+      ]
+    environment:
+      - HF_HOME=/cache/huggingface
+    volumes:
+      - ./model_repository:/models
+      - hf-cache:/cache/huggingface
+
   triton:
     image: nvcr.io/nvidia/tritonserver:24.05-py3
     command: tritonserver --model-repository=/models
@@ -16,6 +36,9 @@ services:
               count: all
               capabilities: [gpu]
     shm_size: "2g"
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
 
   worker:
     build:
@@ -25,6 +48,7 @@ services:
       - "8080:8080"
     environment:
       - TRITON_GRPC_URL=triton:8001
+      - MODEL_PROFILE=baseline
     depends_on:
       - triton
 
@@ -34,7 +58,8 @@ services:
       dockerfile: packages/web/Dockerfile
     ports:
       - "3000:3000"
-    environment:
-      - WORKER_API_URL=http://worker:8080
     depends_on:
       - worker
+
+volumes:
+  hf-cache:
