@@ -95,6 +95,26 @@ def _model_repository_root() -> str:
     return os.getenv("MODEL_REPOSITORY_ROOT") or _default_model_repository_root()
 
 
+@functools.lru_cache(maxsize=4)
+def _cached_vad_client(url: str) -> TritonVadClient:
+    return TritonVadClient(url=url)
+
+
+@functools.lru_cache(maxsize=4)
+def _cached_whisper_client(url: str, model_name: str) -> TritonWhisperClient:
+    return TritonWhisperClient(url=url, model_name=model_name)
+
+
+@functools.lru_cache(maxsize=4)
+def _cached_translation_client(url: str, model_name: str) -> TritonTranslationClient:
+    return TritonTranslationClient(url=url, model_name=model_name)
+
+
+@functools.lru_cache(maxsize=4)
+def _cached_tts_client(url: str, model_name: str) -> TritonTtsClient:
+    return TritonTtsClient(url=url, model_name=model_name)
+
+
 def _get_stage_model_spec(model_id: str, expected_stage: str):
     try:
         model_spec = get_model_spec(model_id)
@@ -142,7 +162,7 @@ def _check_readiness():
     )
 
     try:
-        triton_readiness = TritonVadClient(url=_triton_grpc_url()).readiness()
+        triton_readiness = _cached_vad_client(_triton_grpc_url()).readiness()
     except TritonUnavailableError as exc:
         triton_readiness = TritonReadiness.from_error(
             server_url=_triton_grpc_url(),
@@ -168,9 +188,9 @@ async def tts(
 
     def _work():
         normalized_language = validate_tts_language(language)
-        synthesized = TritonTtsClient(
-            url=_triton_grpc_url(),
-            model_name=model_spec.repository_model_name,
+        synthesized = _cached_tts_client(
+            _triton_grpc_url(),
+            model_spec.repository_model_name,
         ).synthesize(
             text,
             language=normalized_language,
@@ -223,11 +243,8 @@ async def stt(
     def _work():
         return analyze_stt(
             audio=audio,
-            vad_client=TritonVadClient(url=_triton_grpc_url()),
-            stt_client=TritonWhisperClient(
-                url=_triton_grpc_url(),
-                model_name=model_spec.repository_model_name,
-            ),
+            vad_client=_cached_vad_client(_triton_grpc_url()),
+            stt_client=_cached_whisper_client(_triton_grpc_url(), model_spec.repository_model_name),
             threshold=threshold,
             language=language,
             task=task,
@@ -298,19 +315,10 @@ async def localize(
             stt_model=stt_model,
             translation_model=translation_model,
             tts_model=tts_model,
-            vad_client=TritonVadClient(url=_triton_grpc_url()),
-            stt_client=TritonWhisperClient(
-                url=_triton_grpc_url(),
-                model_name=stt_spec.repository_model_name,
-            ),
-            translation_client=TritonTranslationClient(
-                url=_triton_grpc_url(),
-                model_name=translation_spec.repository_model_name,
-            ),
-            tts_client=TritonTtsClient(
-                url=_triton_grpc_url(),
-                model_name=tts_spec.repository_model_name,
-            ),
+            vad_client=_cached_vad_client(_triton_grpc_url()),
+            stt_client=_cached_whisper_client(_triton_grpc_url(), stt_spec.repository_model_name),
+            translation_client=_cached_translation_client(_triton_grpc_url(), translation_spec.repository_model_name),
+            tts_client=_cached_tts_client(_triton_grpc_url(), tts_spec.repository_model_name),
         )
 
     try:
@@ -363,7 +371,7 @@ async def vad(
     audio = resample_audio(decode_wav(blob), target_sample_rate=16000)
 
     def _work():
-        return analyze_vad(audio=audio, client=TritonVadClient(url=_triton_grpc_url()), threshold=threshold)
+        return analyze_vad(audio=audio, client=_cached_vad_client(_triton_grpc_url()), threshold=threshold)
 
     try:
         analysis = await _run_cancellable(request, _work)
