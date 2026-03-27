@@ -41,6 +41,12 @@ __pycache__/
 venv/
 .uv/
 
+# TanStack Start / Vite
+.output
+.nitro
+.tanstack
+.vinxi
+
 # moon
 .moon/cache
 .moon/docker
