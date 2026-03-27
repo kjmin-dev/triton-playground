@@ -12,13 +12,13 @@ TRANSLATION_TEXT_OUTPUT = "translated_text"
 SUPPORTED_TRANSLATION_LANGUAGES = ("ko", "en", "ja", "zh")
 
 TRANSLATION_TRITON_INPUT_SPECS = (
-    f"{TRANSLATION_TEXT_INPUT}: BYTES[1] UTF-8 text to translate",
-    f"{TRANSLATION_SOURCE_LANGUAGE_INPUT}: BYTES[1] optional source language hint; empty string means auto-detect",
-    f"{TRANSLATION_TARGET_LANGUAGE_INPUT}: BYTES[1] required target language code",
+    f"{TRANSLATION_TEXT_INPUT}: STRING[1] UTF-8 text to translate",
+    f"{TRANSLATION_SOURCE_LANGUAGE_INPUT}: STRING[1] optional source language hint; empty string means auto-detect",
+    f"{TRANSLATION_TARGET_LANGUAGE_INPUT}: STRING[1] required target language code",
 )
 
 TRANSLATION_TRITON_OUTPUT_SPECS = (
-    f"{TRANSLATION_TEXT_OUTPUT}: BYTES[1] UTF-8 translated text",
+    f"{TRANSLATION_TEXT_OUTPUT}: STRING[1] UTF-8 translated text",
 )
 
 TRANSLATION_TRITON_NOTES = (

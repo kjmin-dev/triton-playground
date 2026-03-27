@@ -41,7 +41,7 @@ class ModelCatalogTest(unittest.TestCase):
         self.assertEqual(whisper.repository_model_name, "whisper_large_v3_turbo")
         self.assertEqual(whisper.triton_backend, "python")
         self.assertTrue(any(contract.startswith("audio_pcm: FP32") for contract in whisper.triton_inputs))
-        self.assertEqual(whisper.triton_outputs, ("transcript: BYTES[1] UTF-8 transcript for the supplied segment",))
+        self.assertEqual(whisper.triton_outputs, ("transcript: STRING[1] UTF-8 transcript for the supplied segment",))
 
     def test_localization_pair_declares_manual_triton_contracts(self) -> None:
         specs = {spec.model_id: spec for spec in list_model_specs()}
@@ -50,7 +50,7 @@ class ModelCatalogTest(unittest.TestCase):
 
         self.assertEqual(translation.repository_model_name, "madlad400_3b_mt")
         self.assertEqual(translation.triton_backend, "python")
-        self.assertIn("translated_text: BYTES[1] UTF-8 translated text", translation.triton_outputs)
+        self.assertIn("translated_text: STRING[1] UTF-8 translated text", translation.triton_outputs)
         self.assertTrue(translation.snapshot_allow_patterns)
         self.assertEqual(translation.runtime_bundle, "localize-runtime")
         self.assertIn("transformers>=4.55", translation.runtime_pip_packages)
@@ -58,11 +58,13 @@ class ModelCatalogTest(unittest.TestCase):
         self.assertEqual(tts.repository_model_name, "qwen3_tts_0_6b")
         self.assertEqual(tts.triton_backend, "python")
         self.assertTrue(any(contract.startswith("audio_pcm: FP32[1, samples]") for contract in tts.triton_outputs))
-        self.assertEqual(tts.hf_repo_id, "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
+        self.assertEqual(tts.hf_repo_id, "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
         self.assertEqual(tts.runtime_bundle, "localize-runtime")
-        self.assertEqual(tts.revision, "22fe0656d05e0d0d2ca5cd129449e3487b043c59")
+        self.assertEqual(tts.revision, "5d83992436eae1d760afd27aff78a71d676296fc")
         self.assertIn("qwen-tts>=0.1.0", tts.runtime_pip_packages)
-        self.assertIn("CustomVoice checkpoint", tts.notes)
+        self.assertIn("voice cloning", tts.notes)
+        self.assertTrue(any("ref_audio" in spec for spec in tts.triton_inputs))
+        self.assertTrue(any("ref_text" in spec for spec in tts.triton_inputs))
 
 
 if __name__ == "__main__":

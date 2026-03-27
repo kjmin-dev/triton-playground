@@ -75,7 +75,7 @@ class PrepareModelsTest(unittest.TestCase):
 
         self.assertFalse(translation["installed"])
         self.assertEqual(translation["repository_model_name"], "madlad400_3b_mt")
-        self.assertIn("translated_text: BYTES[1] UTF-8 translated text", translation["triton_outputs"])
+        self.assertIn("translated_text: STRING[1] UTF-8 translated text", translation["triton_outputs"])
 
         self.assertFalse(tts["installed"])
         self.assertEqual(tts["repository_model_name"], "qwen3_tts_0_6b")

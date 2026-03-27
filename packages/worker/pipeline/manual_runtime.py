@@ -31,16 +31,14 @@ def _parse_triton_tensor_spec(entry: str) -> tuple[str, str, list[int], str]:
 
 def _render_pbtxt_tensor_block(kind: str, entry: str) -> str:
     name, dtype, dims, description = _parse_triton_tensor_spec(entry)
-    dim_lines = "\n".join(f"      {dim}" for dim in dims)
+    dim_str = ", ".join(str(d) for d in dims)
     comment = f"# {description}\n" if description else ""
     return (
         f"{comment}{kind} [\n"
         "  {\n"
         f'    name: "{name}"\n'
         f"    data_type: TYPE_{dtype}\n"
-        "    dims: [\n"
-        f"{dim_lines}\n"
-        "    ]\n"
+        f"    dims: [ {dim_str} ]\n"
         "  }\n"
         "]\n"
     )
