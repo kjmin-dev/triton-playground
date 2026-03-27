@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+from pipeline.stt_contract import (
+    DEFAULT_WHISPER_REPOSITORY_MODEL_NAME,
+    WHISPER_TRITON_BACKEND,
+    WHISPER_TRITON_INPUT_SPECS,
+    WHISPER_TRITON_NOTES,
+    WHISPER_TRITON_OUTPUT_SPECS,
+)
+
 
 AUTO_DOWNLOAD_LANE = "auto-download + auto-serve"
 MANUAL_PLANNED_LANE = "manual-download + planned-serve"
@@ -29,10 +37,16 @@ class ModelSpec:
     next_action: str
     notes: str
     artifacts: tuple[ModelArtifact, ...] = ()
+    triton_backend: str | None = None
+    triton_inputs: tuple[str, ...] = ()
+    triton_outputs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.serve_status not in VALID_SERVE_STATUSES:
             raise ValueError(f"Unknown serve status for {self.model_id}: {self.serve_status}")
+
+        if (self.triton_backend is not None or self.triton_inputs or self.triton_outputs) and self.repository_model_name is None:
+            raise ValueError(f"{self.model_id} declares a Triton contract but no repository model name")
 
         if self.serve_status == AUTO_DOWNLOAD_LANE:
             if not self.approved_for_auto_download:
@@ -85,9 +99,12 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         license_name="MIT",
         approved_for_auto_download=False,
         serve_status=MANUAL_PLANNED_LANE,
-        repository_model_name=None,
-        next_action="Finalize the Whisper serving backend and opt-in materialization path in Stream C.",
-        notes="Pinned upstream source, but kept out of automatic startup until the backend contract is fixed.",
+        repository_model_name=DEFAULT_WHISPER_REPOSITORY_MODEL_NAME,
+        next_action="Provision the manual Triton Whisper repository and validate the /api/stt happy path against it.",
+        notes=WHISPER_TRITON_NOTES,
+        triton_backend=WHISPER_TRITON_BACKEND,
+        triton_inputs=WHISPER_TRITON_INPUT_SPECS,
+        triton_outputs=WHISPER_TRITON_OUTPUT_SPECS,
     ),
     "madlad400_3b_mt": ModelSpec(
         model_id="madlad400_3b_mt",

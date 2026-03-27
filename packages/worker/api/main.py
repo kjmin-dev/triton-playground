@@ -7,8 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from pipeline.audio import UnsupportedAudioError, decode_wav, resample_audio
-from pipeline.model_catalog import get_profile_model_ids, list_model_specs
+from pipeline.model_catalog import get_model_spec, get_profile_model_ids, list_model_specs
 from pipeline.runtime_status import TritonReadiness, build_ready_payload
+from pipeline.stt import TritonWhisperClient, analyze_stt
+from pipeline.stt_contract import DEFAULT_WHISPER_MODEL_ID
 from pipeline.triton import (
     TritonUnavailableError,
     TritonVadClient,
@@ -89,10 +91,64 @@ async def tts(text: str, model: str = "cosyvoice3"):
 
 
 @app.post("/api/stt")
-async def stt(file: UploadFile, model: str = "whisper_v3_turbo"):
-    """Speech-to-Text via Triton."""
-    # TODO: tritonclient gRPC call
-    return {"status": "not_implemented", "model": model, "filename": file.filename}
+async def stt(
+    file: UploadFile = File(...),
+    threshold: float = Query(0.5, ge=0.1, le=0.99),
+    language: str | None = Query(None),
+    task: str = Query("transcribe"),
+    prompt: str | None = Query(None, max_length=200),
+    model: str = Query(DEFAULT_WHISPER_MODEL_ID),
+):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="file is required")
+
+    blob = await file.read()
+    if not blob:
+        raise HTTPException(status_code=400, detail="uploaded file is empty")
+
+    try:
+        model_spec = get_model_spec(model)
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if model_spec.stage != "stt" or model_spec.repository_model_name is None:
+        raise HTTPException(status_code=400, detail=f"{model} is not a configured STT model")
+
+    try:
+        audio = resample_audio(decode_wav(blob), target_sample_rate=16000)
+        analysis = analyze_stt(
+            audio=audio,
+            vad_client=TritonVadClient(url=_triton_grpc_url()),
+            stt_client=TritonWhisperClient(
+                url=_triton_grpc_url(),
+                model_name=model_spec.repository_model_name,
+            ),
+            threshold=threshold,
+            language=language,
+            task=task,
+            prompt=prompt,
+        )
+    except UnsupportedAudioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TritonUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {
+        "status": "ok",
+        "filename": file.filename,
+        "model": model,
+        "repository_model_name": model_spec.repository_model_name,
+        "sample_rate": analysis.sample_rate,
+        "duration_ms": analysis.duration_ms,
+        "threshold": analysis.threshold,
+        "task": analysis.task,
+        "language": analysis.language,
+        "segment_count": len(analysis.segments),
+        "transcript": analysis.transcript,
+        "segments": [segment.to_dict() for segment in analysis.segments],
+    }
 
 
 @app.post("/api/separate")

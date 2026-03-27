@@ -52,6 +52,8 @@ To stage the Whisper planning manifest without enabling automatic download:
 bun run prepare:models --profile stt
 ```
 
+The `stt` manifest records the manual Whisper repository name and tensor contract so the worker and operator agree on the same Triton interface before any weights are mounted.
+
 For local worker development against an already-running Triton instance:
 
 ```sh
@@ -108,6 +110,27 @@ Expected behavior:
 - `/api/ready` returns `200` with `"status": "ready"` when Triton and `silero_vad` are ready
 - `/api/ready` returns `503` with diagnostic `triton.summary`, `triton.issues`, and `repository.*` details when Triton is unreachable or the model failed to load
 - `/api/vad` returns speech segments only after the readiness check is healthy
+
+## Whisper STT Lane
+
+The second lane is manual by design. The worker exposes `POST /api/stt`, but the operator must provision a Triton Python backend named `whisper_large_v3_turbo` first.
+
+Expected Triton contract:
+
+- inputs: `audio_pcm`, `sample_rate`, `task`, `language`, `prompt`
+- output: `transcript`
+- audio shape: mono 16 kHz PCM in `FP32`
+
+The worker runs Silero VAD first, then sends each detected speech segment to Whisper and concatenates the returned text.
+
+Example:
+
+```sh
+curl -X POST "http://localhost:8080/api/stt?threshold=0.5&language=ko" \
+  -F "file=@sample.wav"
+```
+
+If the Whisper repository is missing from Triton, `/api/stt` returns `503` with the Triton readiness summary instead of silently falling back.
 
 ## Scripts
 

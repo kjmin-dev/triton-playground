@@ -35,6 +35,7 @@ The state machine is intentionally small:
   - cataloged and reviewable
   - may be referenced by later streams, but is not installed by the automatic baseline materializer
   - must keep a pinned upstream repository and revision
+  - should declare the expected Triton repository model name and tensor contract before worker endpoints depend on it
 - `hold`
   - catalog only
   - no automatic download path
@@ -50,6 +51,7 @@ The worker materializer supports these profiles:
 - `stt`
   - `silero_vad` plus Whisper metadata
   - useful when Stream C needs a planning manifest without changing the runtime baseline
+  - emits the manual Whisper repository name and tensor contract in `MANIFEST.json`
 - `catalog`
   - the full catalog
   - emits the policy inventory and audit trail without widening automatic download behavior
@@ -59,7 +61,7 @@ The worker materializer supports these profiles:
 | ID | Upstream | License | Lane | Next action |
 |----|----------|---------|------|-------------|
 | `silero_vad` | `onnx-community/silero-vad` | MIT | `auto-download + auto-serve` | Keep the baseline path pinned and runnable. |
-| `whisper_large_v3_turbo` | `openai/whisper-large-v3-turbo` | MIT | `manual-download + planned-serve` | Finalize the Whisper serving backend and opt-in path in Stream C. |
+| `whisper_large_v3_turbo` | `openai/whisper-large-v3-turbo` | MIT | `manual-download + planned-serve` | Provision the manual Triton Whisper repository and validate the `/api/stt` happy path. |
 | `madlad400_3b_mt` | `google/madlad400-3b-mt` | Apache 2.0 | `manual-download + planned-serve` | Choose a serving backend and resource budget. |
 | `cosyvoice3_0_5b` | `FunAudioLLM/Fun-CosyVoice3-0.5B-2512` | Apache 2.0 | `manual-download + planned-serve` | Define the voice-cloning policy and streaming contract. |
 | `qwen3_tts_0_6b` | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | Apache 2.0 | `manual-download + planned-serve` | Define the low-latency serving contract. |
@@ -99,7 +101,9 @@ The manifest now includes the selected profile, the policy lane state machine, a
 
 - `Whisper large-v3-turbo`
   - keep auto-download off
-  - Stream C can build against the manual-download catalog entry without reopening governance
+  - serve via a manual Triton Python backend named `whisper_large_v3_turbo`
+  - worker contract is `audio_pcm`, `sample_rate`, `task`, `language`, `prompt` -> `transcript`
+  - worker runs Silero VAD first and transcribes one detected speech segment at a time
 - `MADLAD-400 3B`
   - likely Triton Python backend first
 - `CosyVoice3` and `Qwen3-TTS`

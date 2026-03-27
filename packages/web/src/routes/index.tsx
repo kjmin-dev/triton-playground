@@ -1,6 +1,6 @@
 import * as React from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { BadgeInfo, FileAudio2, SlidersHorizontal, Waves } from "lucide-react";
+import { BadgeInfo, FileAudio2, Languages, SlidersHorizontal, Waves } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -60,7 +60,35 @@ type VadResponse = {
   window_scores: number[];
 };
 
+type SttResponse = {
+  duration_ms: number;
+  filename: string;
+  language: string;
+  model: string;
+  repository_model_name: string;
+  sample_rate: number;
+  segment_count: number;
+  segments: Array<{
+    average_probability: number;
+    duration_ms: number;
+    end_ms: number;
+    peak_probability: number;
+    start_ms: number;
+    text: string;
+  }>;
+  task: string;
+  threshold: number;
+  transcript: string;
+};
+
 const THRESHOLD_PRESETS = [0.3, 0.45, 0.5, 0.65, 0.8];
+const STT_LANGUAGE_OPTIONS = [
+  { value: "auto", label: "Auto detect" },
+  { value: "ko", label: "Korean" },
+  { value: "en", label: "English" },
+  { value: "ja", label: "Japanese" },
+  { value: "zh", label: "Chinese" },
+];
 const WINDOW_SCORE_PREVIEW_LIMIT = 80;
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const MAX_DURATION_SECONDS = 15 * 60;
@@ -84,16 +112,20 @@ function formatThreshold(value: number) {
 function Home() {
   const workerBaseUrl = getWorkerBaseUrl();
   const [threshold, setThreshold] = React.useState("0.5");
+  const [language, setLanguage] = React.useState("auto");
   const [selectedFile, setSelectedFile] = React.useState<File | null>(null);
   const [error, setError] = React.useState<string | null>(null);
-  const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const [activeRun, setActiveRun] = React.useState<"vad" | "stt" | null>(null);
   const [ready, setReady] = React.useState<ReadyResponse | null>(null);
   const [catalog, setCatalog] = React.useState<ModelsResponse | null>(null);
   const [result, setResult] = React.useState<VadResponse | null>(null);
+  const [sttResult, setSttResult] = React.useState<SttResponse | null>(null);
 
   const parsedThreshold = Number.parseFloat(threshold);
   const thresholdIsValid =
     Number.isFinite(parsedThreshold) && parsedThreshold >= 0.1 && parsedThreshold <= 0.99;
+  const isRunningVad = activeRun === "vad";
+  const isRunningStt = activeRun === "stt";
   const selectedFileSummary = selectedFile
     ? `${selectedFile.name} · ${selectedFile.type || "unknown type"} · ${formatBytes(selectedFile.size)}`
     : "No file selected yet";
@@ -150,9 +182,7 @@ function Home() {
     };
   }, [workerBaseUrl]);
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
+  async function runWorkerRoute(route: "vad" | "stt") {
     if (!selectedFile) {
       setError("Upload a PCM WAV file first.");
       return;
@@ -163,35 +193,61 @@ function Home() {
       return;
     }
 
-    setIsSubmitting(true);
+    setActiveRun(route);
     setError(null);
-    setResult(null);
+    if (route === "vad") {
+      setResult(null);
+    } else {
+      setSttResult(null);
+    }
 
     try {
       const formData = new FormData();
       formData.append("file", selectedFile);
 
-      const response = await fetch(
-        `${workerBaseUrl}/api/vad?threshold=${encodeURIComponent(threshold)}`,
-        {
+      const query = new URLSearchParams({ threshold });
+      let response: Response;
+      if (route === "vad") {
+        response = await fetch(`${workerBaseUrl}/api/vad?${query.toString()}`, {
           method: "POST",
           body: formData,
-        },
-      );
+        });
+      } else {
+        if (language !== "auto") {
+          query.set("language", language);
+        }
+        response = await fetch(`${workerBaseUrl}/api/stt?${query.toString()}`, {
+          method: "POST",
+          body: formData,
+        });
+      }
 
       const payload = await response.json().catch(() => ({} as { detail?: string }));
       if (!response.ok) {
         throw new Error(payload.detail ?? `request failed with ${response.status}`);
       }
 
-      setResult(payload as VadResponse);
+      if (route === "vad") {
+        setResult(payload as VadResponse);
+      } else {
+        setSttResult(payload as SttResponse);
+      }
     } catch (submitError) {
       setError(
-        submitError instanceof Error ? submitError.message : "failed to run VAD",
+        submitError instanceof Error
+          ? submitError.message
+          : route === "vad"
+            ? "failed to run VAD"
+            : "failed to run STT",
       );
     } finally {
-      setIsSubmitting(false);
+      setActiveRun(null);
     }
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await runWorkerRoute("vad");
   }
 
   return (
@@ -273,6 +329,27 @@ function Home() {
                         </button>
                       ))}
                     </div>
+                    <label className="grid gap-2 pt-2 text-sm font-medium text-slate-900">
+                      <span className="flex items-center gap-2">
+                        <Languages className="h-4 w-4 text-slate-500" />
+                        Whisper language hint
+                      </span>
+                      <select
+                        className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                        onChange={(event) => setLanguage(event.target.value)}
+                        value={language}
+                      >
+                        {STT_LANGUAGE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="text-xs font-normal leading-5 text-slate-500">
+                        Optional for the Whisper lane. `auto` keeps language detection in the
+                        manual backend.
+                      </span>
+                    </label>
                   </div>
                 </div>
 
@@ -284,9 +361,21 @@ function Home() {
                       containers, and oversized files are rejected with explicit reasons.
                     </p>
                   </div>
-                  <Button disabled={isSubmitting} type="submit">
-                    {isSubmitting ? "Running VAD..." : "Run Happy Path"}
-                  </Button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button disabled={activeRun !== null} type="submit">
+                      {isRunningVad ? "Running VAD..." : "Run VAD Happy Path"}
+                    </Button>
+                    <Button
+                      disabled={activeRun !== null}
+                      onClick={() => {
+                        void runWorkerRoute("stt");
+                      }}
+                      type="button"
+                      variant="outline"
+                    >
+                      {isRunningStt ? "Running STT..." : "Run Audio -> VAD -> STT"}
+                    </Button>
+                  </div>
                 </div>
 
                 {error ? (
@@ -378,164 +467,295 @@ function Home() {
             </CardContent>
           </Card>
 
-          <Card className="border-slate-200/70 bg-white/90 shadow-sm">
-            <CardHeader>
-              <CardTitle>Speech Segments</CardTitle>
-              <CardDescription>
-                Inspect the segment list and the per-window score trace returned by the worker.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-5">
-              {result ? (
-                <>
-                  <div className="grid gap-3 md:grid-cols-5">
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                        file
-                      </div>
-                      <div className="mt-1 text-sm font-medium text-slate-950">
-                        {result.filename}
-                      </div>
-                    </div>
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                        duration
-                      </div>
-                      <div className="mt-1 text-sm font-medium text-slate-950">
-                        {result.duration_ms} ms
-                      </div>
-                    </div>
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                        sample rate
-                      </div>
-                      <div className="mt-1 text-sm font-medium text-slate-950">
-                        {result.sample_rate} Hz
-                      </div>
-                    </div>
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                        segments
-                      </div>
-                      <div className="mt-1 text-sm font-medium text-slate-950">
-                        {result.segment_count}
-                      </div>
-                    </div>
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                        speech windows
-                      </div>
-                      <div className="mt-1 text-sm font-medium text-slate-950">
-                        {speechWindowCount} / {result.window_scores.length}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-sm font-medium text-slate-950">Window score trace</div>
-                        <div className="text-xs text-slate-500">
-                          First {windowScoresPreview.length} of {result.window_scores.length} windows.
+          <div className="grid gap-6">
+            <Card className="border-slate-200/70 bg-white/90 shadow-sm">
+              <CardHeader>
+                <CardTitle>Speech Segments</CardTitle>
+                <CardDescription>
+                  Inspect the segment list and the per-window score trace returned by the worker.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-5">
+                {result ? (
+                  <>
+                    <div className="grid gap-3 md:grid-cols-5">
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          file
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {result.filename}
                         </div>
                       </div>
-                      <div className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700">
-                        threshold {formatThreshold(result.threshold)}
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          duration
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {result.duration_ms} ms
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          sample rate
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {result.sample_rate} Hz
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          segments
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {result.segment_count}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          speech windows
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {speechWindowCount} / {result.window_scores.length}
+                        </div>
                       </div>
                     </div>
-                    {windowScoresPreview.length > 0 ? (
-                      <div
-                        className="grid h-36 items-end gap-[2px]"
-                        style={{
-                          gridTemplateColumns: `repeat(${windowScoresPreview.length}, minmax(0, 1fr))`,
-                        }}
-                      >
-                        {windowScoresPreview.map((score, index) => {
-                          const active = score >= result.threshold;
-                          const barHeight = `${Math.max(6, Math.min(100, score * 100))}%`;
 
-                          return (
-                            <div
-                              className="flex h-full items-end"
-                              key={`${index}-${score}`}
-                              title={`window ${index + 1}: ${score.toFixed(4)}`}
-                            >
+                    <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-medium text-slate-950">Window score trace</div>
+                          <div className="text-xs text-slate-500">
+                            First {windowScoresPreview.length} of {result.window_scores.length} windows.
+                          </div>
+                        </div>
+                        <div className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700">
+                          threshold {formatThreshold(result.threshold)}
+                        </div>
+                      </div>
+                      {windowScoresPreview.length > 0 ? (
+                        <div
+                          className="grid h-36 items-end gap-[2px]"
+                          style={{
+                            gridTemplateColumns: `repeat(${windowScoresPreview.length}, minmax(0, 1fr))`,
+                          }}
+                        >
+                          {windowScoresPreview.map((score, index) => {
+                            const active = score >= result.threshold;
+                            const barHeight = `${Math.max(6, Math.min(100, score * 100))}%`;
+
+                            return (
                               <div
-                                className={`w-full rounded-t-sm ${active ? "bg-emerald-500" : "bg-slate-300"}`}
-                                style={{ height: barHeight }}
-                              />
+                                className="flex h-full items-end"
+                                key={`${index}-${score}`}
+                                title={`window ${index + 1}: ${score.toFixed(4)}`}
+                              >
+                                <div
+                                  className={`w-full rounded-t-sm ${active ? "bg-emerald-500" : "bg-slate-300"}`}
+                                  style={{ height: barHeight }}
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-500">No window scores were returned.</p>
+                      )}
+                    </div>
+
+                    {result.segments.length > 0 ? (
+                      <div className="grid gap-3">
+                        {result.segments.map((segment, index) => (
+                          <div
+                            className="rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm"
+                            key={`${segment.start_ms}-${segment.end_ms}`}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <div className="text-sm font-medium text-slate-950">
+                                  Segment {index + 1}
+                                </div>
+                                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                                  {segment.start_ms} ms to {segment.end_ms} ms
+                                </div>
+                              </div>
+                              <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
+                                {segment.duration_ms} ms
+                              </div>
                             </div>
-                          );
-                        })}
+
+                            <div className="mt-3 grid gap-3 md:grid-cols-2">
+                              <div>
+                                <div className="flex items-center justify-between text-xs text-slate-500">
+                                  <span>Average probability</span>
+                                  <span>{segment.average_probability}</span>
+                                </div>
+                                <div className="mt-1 h-2 rounded-full bg-slate-100">
+                                  <div
+                                    className="h-2 rounded-full bg-emerald-500"
+                                    style={{ width: `${Math.min(100, segment.average_probability * 100)}%` }}
+                                  />
+                                </div>
+                              </div>
+                              <div>
+                                <div className="flex items-center justify-between text-xs text-slate-500">
+                                  <span>Peak probability</span>
+                                  <span>{segment.peak_probability}</span>
+                                </div>
+                                <div className="mt-1 h-2 rounded-full bg-slate-100">
+                                  <div
+                                    className="h-2 rounded-full bg-sky-500"
+                                    style={{ width: `${Math.min(100, segment.peak_probability * 100)}%` }}
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     ) : (
-                      <p className="text-sm text-slate-500">No window scores were returned.</p>
+                      <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                        No speech segments crossed the current threshold.
+                      </p>
                     )}
+                  </>
+                ) : (
+                  <div className="rounded-xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
+                    The result panel fills once the VAD happy path returns segment data.
                   </div>
+                )}
+              </CardContent>
+            </Card>
 
-                  {result.segments.length > 0 ? (
-                    <div className="grid gap-3">
-                      {result.segments.map((segment, index) => (
-                        <div
-                          className="rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm"
-                          key={`${segment.start_ms}-${segment.end_ms}`}
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <div className="text-sm font-medium text-slate-950">
-                                Segment {index + 1}
-                              </div>
-                              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                                {segment.start_ms} ms to {segment.end_ms} ms
-                              </div>
-                            </div>
-                            <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
-                              {segment.duration_ms} ms
-                            </div>
-                          </div>
-
-                          <div className="mt-3 grid gap-3 md:grid-cols-2">
-                            <div>
-                              <div className="flex items-center justify-between text-xs text-slate-500">
-                                <span>Average probability</span>
-                                <span>{segment.average_probability}</span>
-                              </div>
-                              <div className="mt-1 h-2 rounded-full bg-slate-100">
-                                <div
-                                  className="h-2 rounded-full bg-emerald-500"
-                                  style={{ width: `${Math.min(100, segment.average_probability * 100)}%` }}
-                                />
-                              </div>
-                            </div>
-                            <div>
-                              <div className="flex items-center justify-between text-xs text-slate-500">
-                                <span>Peak probability</span>
-                                <span>{segment.peak_probability}</span>
-                              </div>
-                              <div className="mt-1 h-2 rounded-full bg-slate-100">
-                                <div
-                                  className="h-2 rounded-full bg-sky-500"
-                                  style={{ width: `${Math.min(100, segment.peak_probability * 100)}%` }}
-                                />
-                              </div>
-                            </div>
-                          </div>
+            <Card className="border-slate-200/70 bg-white/90 shadow-sm">
+              <CardHeader>
+                <CardTitle>Whisper STT</CardTitle>
+                <CardDescription>
+                  The worker reuses Silero VAD, then sends each detected speech segment to the
+                  manual Whisper Triton backend.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-5">
+                {sttResult ? (
+                  <>
+                    <div className="grid gap-3 md:grid-cols-5">
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          model
                         </div>
-                      ))}
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {sttResult.repository_model_name}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          task
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {sttResult.task}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          language
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {sttResult.language}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          segments
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {sttResult.segment_count}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          threshold
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-slate-950">
+                          {formatThreshold(sttResult.threshold)}
+                        </div>
+                      </div>
                     </div>
-                  ) : (
-                    <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                      No speech segments crossed the current threshold.
-                    </p>
-                  )}
-                </>
-              ) : (
-                <div className="rounded-xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
-                  The result panel fills once the VAD happy path returns segment data.
-                </div>
-              )}
-            </CardContent>
-          </Card>
+
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                        aggregated transcript
+                      </div>
+                      <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-slate-800">
+                        {sttResult.transcript || "No transcript text was returned for the detected speech segments."}
+                      </p>
+                    </div>
+
+                    {sttResult.segments.length > 0 ? (
+                      <div className="grid gap-3">
+                        {sttResult.segments.map((segment, index) => (
+                          <div
+                            className="rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm"
+                            key={`${segment.start_ms}-${segment.end_ms}-stt`}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <div className="text-sm font-medium text-slate-950">
+                                  Transcript segment {index + 1}
+                                </div>
+                                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                                  {segment.start_ms} ms to {segment.end_ms} ms
+                                </div>
+                              </div>
+                              <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
+                                {segment.duration_ms} ms
+                              </div>
+                            </div>
+                            <p className="mt-3 rounded-lg bg-slate-50 px-3 py-3 text-sm leading-6 text-slate-800">
+                              {segment.text || "No text returned for this segment."}
+                            </p>
+                            <div className="mt-3 grid gap-3 md:grid-cols-2">
+                              <div>
+                                <div className="flex items-center justify-between text-xs text-slate-500">
+                                  <span>Average probability</span>
+                                  <span>{segment.average_probability}</span>
+                                </div>
+                                <div className="mt-1 h-2 rounded-full bg-slate-100">
+                                  <div
+                                    className="h-2 rounded-full bg-emerald-500"
+                                    style={{ width: `${Math.min(100, segment.average_probability * 100)}%` }}
+                                  />
+                                </div>
+                              </div>
+                              <div>
+                                <div className="flex items-center justify-between text-xs text-slate-500">
+                                  <span>Peak probability</span>
+                                  <span>{segment.peak_probability}</span>
+                                </div>
+                                <div className="mt-1 h-2 rounded-full bg-slate-100">
+                                  <div
+                                    className="h-2 rounded-full bg-sky-500"
+                                    style={{ width: `${Math.min(100, segment.peak_probability * 100)}%` }}
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                        No speech segments were detected, so Whisper was not invoked.
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <div className="rounded-xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
+                    Run the STT lane to inspect the aggregated transcript and per-segment text.
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
         </section>
       </div>
     </main>

@@ -44,6 +44,22 @@ class PrepareModelsTest(unittest.TestCase):
             self.assertTrue(manifest_path.exists())
             self.assertIn("silero_vad", manifest_path.read_text(encoding="utf-8"))
 
+    def test_stt_profile_manifest_keeps_whisper_manual_and_records_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = prepare_model_repository(
+                output_root=Path(temp_dir),
+                model_ids=["whisper_large_v3_turbo"],
+            )
+
+        self.assertEqual(len(manifest["models"]), 1)
+        whisper = manifest["models"][0]
+        self.assertEqual(whisper["model_id"], "whisper_large_v3_turbo")
+        self.assertFalse(whisper["installed"])
+        self.assertEqual(whisper["repository_model_name"], "whisper_large_v3_turbo")
+        self.assertEqual(whisper["triton_backend"], "python")
+        self.assertIn("audio_pcm: FP32[1, samples]", whisper["triton_inputs"][0])
+        self.assertIn("manual download", whisper["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

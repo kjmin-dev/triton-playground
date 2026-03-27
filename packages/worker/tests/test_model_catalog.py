@@ -28,6 +28,16 @@ class ModelCatalogTest(unittest.TestCase):
         self.assertEqual(specs["bs_roformer"].serve_status, "hold")
         self.assertTrue(specs["bs_roformer"].next_action.startswith("Pin the exact redistributable weight source"))
 
+    def test_whisper_declares_manual_triton_contract(self) -> None:
+        specs = {spec.model_id: spec for spec in list_model_specs()}
+        whisper = specs["whisper_large_v3_turbo"]
+
+        self.assertFalse(whisper.approved_for_auto_download)
+        self.assertEqual(whisper.repository_model_name, "whisper_large_v3_turbo")
+        self.assertEqual(whisper.triton_backend, "python")
+        self.assertTrue(any(contract.startswith("audio_pcm: FP32") for contract in whisper.triton_inputs))
+        self.assertEqual(whisper.triton_outputs, ("transcript: BYTES[1] UTF-8 transcript for the supplied segment",))
+
 
 if __name__ == "__main__":
     unittest.main()
