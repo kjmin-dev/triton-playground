@@ -11,8 +11,23 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
+import os
+import time
+from fnmatch import fnmatch
 from pathlib import Path
+
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
+from rich.table import Table
 
 from pipeline.model_catalog import (
     HOLD_LANE,
@@ -21,6 +36,8 @@ from pipeline.model_catalog import (
     get_model_spec,
     get_profile_model_ids,
 )
+
+_console = Console(stderr=True)
 
 
 def _downloadable_specs() -> list[ModelSpec]:
@@ -34,13 +51,93 @@ def _downloadable_specs() -> list[ModelSpec]:
     ]
 
 
-def _download_snapshot(spec: ModelSpec, cache_dir: Path) -> Path:
-    try:
-        from huggingface_hub import snapshot_download
-    except ImportError as exc:
-        raise RuntimeError(
-            "huggingface-hub is required. Run: uv pip install huggingface-hub"
-        ) from exc
+def _resolve_expected_files(
+    spec: ModelSpec,
+    cache_dir: Path,
+) -> tuple[list[str], int]:
+    """Return (filenames, total_bytes) for the files we expect to download."""
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    info = api.repo_info(
+        repo_id=spec.hf_repo_id,
+        revision=spec.revision,
+        files_metadata=True,
+    )
+    patterns = list(spec.snapshot_allow_patterns)
+    files: list[str] = []
+    total_bytes = 0
+    for sibling in info.siblings:
+        if not patterns or any(fnmatch(sibling.rfilename, p) for p in patterns):
+            files.append(sibling.rfilename)
+            total_bytes += sibling.size or 0
+    return files, total_bytes
+
+
+def _download_files(
+    spec: ModelSpec,
+    cache_dir: Path,
+    files: list[str],
+    total_bytes: int,
+    counter: str,
+) -> Path:
+    """Download files one-by-one with a live rich progress bar."""
+    from huggingface_hub import hf_hub_download
+
+    assert spec.hf_repo_id is not None
+    assert spec.revision is not None
+
+    snapshot_path: Path | None = None
+    downloaded_bytes = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn(f"{counter} [bold]{spec.model_id}[/bold]"),
+        BarColumn(bar_width=30),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(compact=True),
+        console=_console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("download", total=total_bytes)
+
+        for filename in files:
+            t0 = time.monotonic()
+            path = hf_hub_download(
+                repo_id=spec.hf_repo_id,
+                filename=filename,
+                revision=spec.revision,
+                cache_dir=str(cache_dir),
+            )
+            elapsed = time.monotonic() - t0
+
+            file_path = Path(path)
+            if snapshot_path is None:
+                # Derive snapshot root from first downloaded file
+                # e.g. .cache/huggingface/hub/models--org--name/snapshots/rev/file
+                parts = file_path.parts
+                snap_idx = parts.index("snapshots") if "snapshots" in parts else None
+                if snap_idx is not None and snap_idx + 2 < len(parts):
+                    snapshot_path = Path(*parts[: snap_idx + 2])
+
+            file_size = file_path.stat().st_size if file_path.exists() else 0
+            downloaded_bytes += file_size
+            cached = elapsed < 0.1 and file_size > 0
+            progress.update(task, completed=downloaded_bytes)
+
+            if not cached:
+                progress.console.print(
+                    f"       [dim]{filename}[/dim]",
+                    highlight=False,
+                )
+
+    return snapshot_path or Path(path).parent
+
+
+def _download_snapshot_simple(spec: ModelSpec, cache_dir: Path) -> Path:
+    """Fallback: use snapshot_download directly (no per-file progress)."""
+    from huggingface_hub import snapshot_download
 
     assert spec.hf_repo_id is not None
     assert spec.revision is not None
@@ -59,6 +156,9 @@ def download_weights(
     model_ids: list[str] | None = None,
     cache_dir: Path | None = None,
 ) -> list[dict[str, str]]:
+    # Suppress huggingface_hub's internal tqdm — we show our own progress
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
     if model_ids:
         specs = [get_model_spec(mid) for mid in model_ids]
     else:
@@ -67,29 +167,60 @@ def download_weights(
     resolved_cache = cache_dir or Path(".cache/huggingface")
     resolved_cache.mkdir(parents=True, exist_ok=True)
 
+    actionable = [
+        s for s in specs
+        if s.snapshot_allow_patterns and s.hf_repo_id and s.revision
+    ]
+    skipped = [s for s in specs if s not in actionable]
+
+    total = len(actionable)
+    _console.print()
+    _console.print(f"  [bold]Downloading model weights[/bold]  [dim]({total} model{'s' if total != 1 else ''})[/dim]")
+    _console.print()
+
+    for spec in skipped:
+        reason = "no snapshot patterns" if not spec.snapshot_allow_patterns else "no upstream pinned"
+        _console.print(f"  [yellow]–[/yellow] [dim]{spec.model_id}: {reason}[/dim]")
+
     results: list[dict[str, str]] = []
-    for spec in specs:
-        if not spec.snapshot_allow_patterns:
-            print(f"  skip {spec.model_id}: no snapshot patterns defined", file=sys.stderr)
-            continue
-        if spec.hf_repo_id is None or spec.revision is None:
-            print(f"  skip {spec.model_id}: no upstream pinned", file=sys.stderr)
+    for i, spec in enumerate(actionable, 1):
+        counter = f"[dim]\\[{i}/{total}][/dim]"
+        repo_label = f"[dim]{spec.hf_repo_id}@{spec.revision[:8]}[/dim]"
+
+        try:
+            files, total_bytes = _resolve_expected_files(spec, resolved_cache)
+        except Exception:
+            files, total_bytes = [], 0
+
+        try:
+            if files and total_bytes > 0:
+                snapshot_path = _download_files(spec, resolved_cache, files, total_bytes, counter)
+            else:
+                _console.print(f"  {counter} [bold]{spec.model_id}[/bold]  {repo_label}")
+                with _console.status("       resolving..."):
+                    snapshot_path = _download_snapshot_simple(spec, resolved_cache)
+        except Exception as exc:
+            _console.print(f"  {counter} [red]✗[/red] [bold]{spec.model_id}[/bold]  [red]{exc}[/red]")
             continue
 
-        print(f"  downloading {spec.model_id} ({spec.hf_repo_id}@{spec.revision[:8]})...", file=sys.stderr)
-        try:
-            snapshot_path = _download_snapshot(spec, resolved_cache)
-        except Exception as exc:
-            print(f"  FAILED {spec.model_id}: {exc}", file=sys.stderr)
-            continue
-        print(f"  done -> {snapshot_path}", file=sys.stderr)
+        _console.print(f"  {counter} [green]✓[/green] [bold]{spec.model_id}[/bold]  {repo_label}")
 
         results.append({
             "model_id": spec.model_id,
-            "hf_repo_id": spec.hf_repo_id,
-            "revision": spec.revision,
+            "hf_repo_id": spec.hf_repo_id or "",
+            "revision": spec.revision or "",
             "snapshot_path": str(snapshot_path),
         })
+
+    _console.print()
+    ok = len(results)
+    if ok == total:
+        _console.print(f"  [bold green]✓ {ok} model{'s' if ok != 1 else ''} ready[/bold green]")
+    elif ok:
+        _console.print(f"  [yellow]✓ {ok}/{total} models ready[/yellow]")
+    else:
+        _console.print(f"  [red]✗ no models downloaded[/red]")
+    _console.print()
 
     return results
 
@@ -107,8 +238,16 @@ def main() -> None:
     args = _parse_args()
 
     if args.list_only:
+        table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+        table.add_column("Model", style="bold")
+        table.add_column("Repository", style="dim")
+        table.add_column("Stage")
         for spec in _downloadable_specs():
-            print(f"  {spec.model_id:30s} {spec.hf_repo_id}@{spec.revision[:8] if spec.revision else '?'}")
+            rev = spec.revision[:8] if spec.revision else "?"
+            table.add_row(spec.model_id, f"{spec.hf_repo_id}@{rev}", spec.stage)
+        _console.print()
+        _console.print(table)
+        _console.print()
         return
 
     model_ids: list[str] | None = None
@@ -120,7 +259,8 @@ def main() -> None:
     cache_dir = Path(args.cache_dir).resolve() if args.cache_dir else None
     results = download_weights(model_ids=model_ids, cache_dir=cache_dir)
 
-    print(json.dumps(results, indent=2))
+    if results:
+        print(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":
