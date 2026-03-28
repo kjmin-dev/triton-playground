@@ -26,10 +26,15 @@ dev-dependencies = [
 pythonVersion = "3.10"
 venvPath = "."
 venv = ".venv"
+include = ["api", "pipeline", "tests"]
 typeCheckingMode = "off"
 reportMissingImports = true
 reportUndefinedVariable = true
-exclude = ["pipeline/backend_templates/"]
+exclude = [
+    ".venv",
+    "**/__pycache__",
+    "pipeline/backend_templates/",
+]
 
 [tool.ruff]
 target-version = "py310"

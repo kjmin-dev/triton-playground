@@ -30,7 +30,7 @@ tasks:
     options:
       cache: false
   typecheck:
-    command: PYTHONPATH=. .venv/bin/pyright .
+    command: PYTHONPATH=. .venv/bin/pyright api pipeline tests
     options:
       cache: false
   test:
