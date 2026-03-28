@@ -67,6 +67,17 @@ Worker orchestrates the localize pipeline: audio upload → VAD → STT → tran
 
 TTS uses Qwen3-TTS Base model with `generate_voice_clone()` to clone the input speaker's voice. The best VAD segment is automatically selected as reference audio. Falls back to predefined speakers when no reference audio is available.
 
+## Runtime Change Guardrails
+
+If a task changes model serving, Triton backends, `prepare_models`, worker capability logic, or TTS actor flows, read [`docs/runtime-change-guardrails.md`](docs/runtime-change-guardrails.md) before editing.
+
+- Treat `model_repository/` and `MANIFEST.json` as generated artifacts, not the source of truth for product behavior.
+- Until a central runtime registry exists, keep `model_catalog.py`, `*_contract.py`, backend templates, `prepare_models.py`, worker capability gating, and web/API gating consistent in the same change.
+- Do not assume one Qwen3-TTS checkpoint supports every TTS mode.
+  - `Qwen3-TTS-12Hz-0.6B-Base` is for reference voice cloning.
+  - `Qwen3-TTS-12Hz-0.6B-CustomVoice` is for preset actor preview and text-only actor TTS.
+- Do not mark a runtime fix complete until the affected model is materialized, live-ready in Triton, the dependent worker endpoint has been exercised, and `bun run check` passes.
+
 ## Conventions
 
 - **Python**: `uv`, `ruff`, `pytest`, type hints (`X | Y`)
