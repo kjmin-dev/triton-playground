@@ -83,14 +83,26 @@ type LocalizeResponse = {
   stage?: string;
   stages: {
     stt: {
+      elapsed_ms?: number;
       language?: string;
       message?: string;
       segment_count?: number;
+      speaker_count?: number;
       status: string;
       task?: string;
       transcript?: string;
+      segments?: Array<{
+        start_ms: number;
+        end_ms: number;
+        duration_ms: number;
+        text: string;
+        average_probability: number;
+        peak_probability: number;
+        speaker_id?: string;
+      }>;
     };
     translation: {
+      elapsed_ms?: number;
       message?: string;
       reason?: string;
       source_language?: string;
@@ -102,11 +114,16 @@ type LocalizeResponse = {
       audio_base64?: string;
       content_type?: string;
       duration_ms?: number;
+      elapsed_ms?: number;
       language?: string;
       message?: string;
       reason?: string;
       sample_rate?: number;
+      speaker_count?: number;
+      speakers?: string[];
       status: string;
+      voice_cloning?: boolean;
+      voice_cloning_mode?: string;
     };
   };
   status: string;
@@ -678,22 +695,27 @@ function Home() {
                     label='STT'
                     model={loc.models.stt}
                     status={loc.stages.stt.status}
-                    elapsed={(loc.stages.stt as Record<string, unknown>).elapsed_ms as number | undefined}
+                    elapsed={loc.stages.stt.elapsed_ms}
+                    detail={
+                      loc.stages.stt.speaker_count && loc.stages.stt.speaker_count > 1
+                        ? `${loc.stages.stt.speaker_count} speakers`
+                        : undefined
+                    }
                   />
                   <Stage
                     label='Translation'
                     model={loc.models.translation}
                     status={loc.stages.translation.status}
-                    elapsed={(loc.stages.translation as Record<string, unknown>).elapsed_ms as number | undefined}
+                    elapsed={loc.stages.translation.elapsed_ms}
                   />
                   <Stage
                     label='TTS'
                     model={loc.models.tts}
                     status={loc.stages.tts.status}
-                    elapsed={(loc.stages.tts as Record<string, unknown>).elapsed_ms as number | undefined}
+                    elapsed={loc.stages.tts.elapsed_ms}
                     detail={
-                      (loc.stages.tts as Record<string, unknown>).voice_cloning
-                        ? `VC: ${(loc.stages.tts as Record<string, unknown>).voice_cloning_mode}`
+                      loc.stages.tts.voice_cloning
+                        ? `VC: ${loc.stages.tts.voice_cloning_mode}${loc.stages.tts.speaker_count && loc.stages.tts.speaker_count > 1 ? ` (${loc.stages.tts.speaker_count})` : ''}`
                         : undefined
                     }
                   />
@@ -751,7 +773,7 @@ function Home() {
                       <div className='mb-2 flex items-center justify-between'>
                         <span className='text-sm font-medium text-slate-700'>
                           Dubbed
-                          {Boolean((loc.stages.tts as Record<string, unknown>).voice_cloning) && (
+                          {loc.stages.tts.voice_cloning && (
                             <span className='ml-1.5 rounded-full bg-cyan-100 px-1.5 py-0.5 text-xs text-cyan-700'>
                               VC
                             </span>
