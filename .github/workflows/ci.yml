@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   python:
-    name: Python (lint + format + test)
+    name: Python (lint + format + typecheck + test)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -38,6 +38,9 @@ jobs:
 
       - name: Format check
         run: .venv/bin/ruff format --check .
+
+      - name: Typecheck
+        run: PYTHONPATH=. .venv/bin/pyright .
 
       - name: Test
         run: PYTHONPATH=. .venv/bin/python -m pytest tests/ -q

@@ -29,5 +29,9 @@ tasks:
     command: .venv/bin/ruff format --check .
     options:
       cache: false
+  typecheck:
+    command: PYTHONPATH=. .venv/bin/pyright .
+    options:
+      cache: false
   test:
     command: PYTHONPATH=. .venv/bin/python -m pytest tests/ -q

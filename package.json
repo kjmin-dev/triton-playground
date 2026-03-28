@@ -17,7 +17,7 @@
     "lint": "moon run :lint web:typecheck",
     "format": "moon run :format",
     "test": "moon run worker:test",
-    "check": "moon run worker:lint worker:format-check worker:test web:lint web:typecheck web:build"
+    "check": "moon run worker:lint worker:format-check worker:typecheck worker:test web:lint web:typecheck web:build"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.9",
