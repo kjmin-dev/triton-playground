@@ -10,6 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline.audio import AudioBuffer
 from pipeline.stt import (
+    SttAnalysis,
+    TranscribedSegment,
     TritonUnavailableError,
     TritonWhisperClient,
     analyze_stt,
@@ -93,6 +95,49 @@ class SttAnalysisTest(unittest.TestCase):
 
         self.assertEqual(analysis.transcript, "")
         self.assertEqual(analysis.segments, [])
+
+    def test_analyze_stt_prefers_server_side_pipeline_when_available(self) -> None:
+        audio = AudioBuffer(samples=np.ones(512 * 8, dtype=np.float32), sample_rate=16000)
+
+        class FakeVadClient:
+            def score_windows(self, windows: np.ndarray) -> list[float]:  # pragma: no cover - should not be called
+                _ = windows
+                raise AssertionError("worker-side VAD should be skipped when Triton STT pipeline is available")
+
+        class FakePipelineClient:
+            def analyze_audio(self, segment_audio: AudioBuffer, **kwargs) -> SttAnalysis:
+                self.call = (len(segment_audio.samples), kwargs["threshold"], kwargs["task"], kwargs["language"])
+                return SttAnalysis(
+                    threshold=kwargs["threshold"],
+                    task=kwargs["task"],
+                    language=kwargs["language"] or "auto",
+                    duration_ms=segment_audio.duration_ms,
+                    sample_rate=segment_audio.sample_rate,
+                    transcript="batched transcript",
+                    segments=[
+                        TranscribedSegment(
+                            start_ms=0,
+                            end_ms=segment_audio.duration_ms,
+                            duration_ms=segment_audio.duration_ms,
+                            average_probability=0.9,
+                            peak_probability=0.9,
+                            text="batched transcript",
+                        )
+                    ],
+                )
+
+        pipeline_client = FakePipelineClient()
+        analysis = analyze_stt(
+            audio=audio,
+            vad_client=FakeVadClient(),
+            stt_client=pipeline_client,
+            threshold=0.6,
+            task="transcribe",
+            language="en",
+        )
+
+        self.assertEqual(analysis.transcript, "batched transcript")
+        self.assertEqual(pipeline_client.call, (4096, 0.6, "transcribe", "en"))
 
     def test_language_and_task_validation_is_explicit(self) -> None:
         self.assertIsNone(normalize_whisper_language("auto"))

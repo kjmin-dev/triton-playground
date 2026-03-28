@@ -329,6 +329,7 @@ def prepare_model_repository(
 
     _write_vad_cpu_config(output_root)
     _materialize_vad_streaming(output_root)
+    _materialize_whisper_stt_pipeline(output_root)
 
     return manifest
 
@@ -403,6 +404,120 @@ def _materialize_vad_streaming(output_root: Path) -> None:
     (model_root / "config.pbtxt").write_text(config, encoding="utf-8")
 
     template = _BACKEND_TEMPLATE_ROOT / "silero_vad_streaming.py"
+    if template.is_file():
+        (version_root / "model.py").write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def _materialize_whisper_stt_pipeline(output_root: Path) -> None:
+    """Create a Triton BLS pipeline that runs VAD + Whisper inside the server."""
+    whisper_backend = output_root / "whisper_large_v3_turbo" / "1" / "model.py"
+    vad_streaming_config = output_root / "silero_vad_streaming" / "config.pbtxt"
+    if not whisper_backend.is_file() or not vad_streaming_config.is_file():
+        return
+
+    model_root = output_root / "whisper_stt_pipeline"
+    version_root = model_root / "1"
+    version_root.mkdir(parents=True, exist_ok=True)
+
+    config = dedent("""\
+        name: "whisper_stt_pipeline"
+        backend: "python"
+        max_batch_size: 0
+        instance_group [
+          {
+            kind: KIND_CPU
+            count: 1
+          }
+        ]
+
+        input [
+          {
+            name: "audio_pcm"
+            data_type: TYPE_FP32
+            dims: [ 1, -1 ]
+          }
+        ]
+        input [
+          {
+            name: "sample_rate"
+            data_type: TYPE_INT32
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "threshold"
+            data_type: TYPE_FP32
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "min_speech_ms"
+            data_type: TYPE_INT32
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "min_silence_ms"
+            data_type: TYPE_INT32
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "pad_ms"
+            data_type: TYPE_INT32
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "window_samples"
+            data_type: TYPE_INT32
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "task"
+            data_type: TYPE_STRING
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "language"
+            data_type: TYPE_STRING
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "prompt"
+            data_type: TYPE_STRING
+            dims: [ 1 ]
+          }
+        ]
+        output [
+          {
+            name: "transcript"
+            data_type: TYPE_STRING
+            dims: [ 1 ]
+          }
+        ]
+        output [
+          {
+            name: "segments_json"
+            data_type: TYPE_STRING
+            dims: [ 1 ]
+          }
+        ]
+    """)
+    (model_root / "config.pbtxt").write_text(config, encoding="utf-8")
+
+    template = _BACKEND_TEMPLATE_ROOT / "whisper_stt_pipeline.py"
     if template.is_file():
         (version_root / "model.py").write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
 

@@ -16,8 +16,13 @@ from pipeline.audio import UnsupportedAudioError, decode_wav, resample_audio
 from pipeline.localization import LocalizationStageError, localize_audio
 from pipeline.model_catalog import get_model_spec, get_profile_model_ids, list_model_specs
 from pipeline.runtime_status import TritonReadiness, build_ready_payload
-from pipeline.stt import TranscribedSegment, TritonWhisperClient, analyze_stt
-from pipeline.stt_contract import DEFAULT_WHISPER_MODEL_ID
+from pipeline.stt import (
+    TranscribedSegment,
+    TritonWhisperClient,
+    TritonWhisperSttPipelineClient,
+    analyze_stt,
+)
+from pipeline.stt_contract import DEFAULT_WHISPER_MODEL_ID, DEFAULT_WHISPER_REPOSITORY_MODEL_NAME
 from pipeline.subtitles import segments_to_csv, segments_to_srt, segments_to_vtt
 from pipeline.translation import TritonTranslationClient
 from pipeline.translation_contract import DEFAULT_TRANSLATION_MODEL_ID
@@ -112,7 +117,16 @@ def _cached_vad_client(url: str) -> TritonVadClient | TritonVadStreamingClient:
 
 
 @functools.lru_cache(maxsize=4)
-def _cached_whisper_client(url: str, model_name: str) -> TritonWhisperClient:
+def _cached_stt_client(url: str, model_name: str):
+    if model_name == DEFAULT_WHISPER_REPOSITORY_MODEL_NAME:
+        try:
+            pipeline_client = TritonWhisperSttPipelineClient(url=url)
+            readiness = pipeline_client.readiness()
+            if readiness.ready:
+                logger.info("Using Triton STT pipeline client (VAD + Whisper in one gRPC call)")
+                return pipeline_client
+        except TritonUnavailableError:
+            pass
     return TritonWhisperClient(url=url, model_name=model_name)
 
 
@@ -255,7 +269,7 @@ async def stt(
         return analyze_stt(
             audio=audio,
             vad_client=_cached_vad_client(_triton_grpc_url()),
-            stt_client=_cached_whisper_client(_triton_grpc_url(), model_spec.repository_model_name),
+            stt_client=_cached_stt_client(_triton_grpc_url(), model_spec.repository_model_name),
             threshold=threshold,
             language=language,
             task=task,
@@ -327,7 +341,7 @@ async def localize(
             translation_model=translation_model,
             tts_model=tts_model,
             vad_client=_cached_vad_client(_triton_grpc_url()),
-            stt_client=_cached_whisper_client(_triton_grpc_url(), stt_spec.repository_model_name),
+            stt_client=_cached_stt_client(_triton_grpc_url(), stt_spec.repository_model_name),
             translation_client=_cached_translation_client(_triton_grpc_url(), translation_spec.repository_model_name),
             tts_client=_cached_tts_client(_triton_grpc_url(), tts_spec.repository_model_name),
         )

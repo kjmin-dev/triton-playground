@@ -176,6 +176,25 @@ class PrepareModelsTest(unittest.TestCase):
             self.assertTrue(record["installed"])
             self.assertEqual(record["materialization_mode"], "opt_in_manual_prepare")
 
+    def test_materialize_whisper_stt_pipeline_when_vad_and_whisper_are_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = Path(temp_dir)
+            whisper_root = output_root / "whisper_large_v3_turbo" / "1"
+            vad_root = output_root / "silero_vad_streaming"
+            whisper_root.mkdir(parents=True)
+            vad_root.mkdir(parents=True)
+            (whisper_root / "model.py").write_text("# whisper backend\n", encoding="utf-8")
+            (vad_root / "config.pbtxt").write_text('name: "silero_vad_streaming"\n', encoding="utf-8")
+
+            prepare_models_module._materialize_whisper_stt_pipeline(output_root)
+
+            pipeline_config = output_root / "whisper_stt_pipeline" / "config.pbtxt"
+            pipeline_model = output_root / "whisper_stt_pipeline" / "1" / "model.py"
+            self.assertTrue(pipeline_config.exists())
+            self.assertTrue(pipeline_model.exists())
+            self.assertIn('name: "whisper_stt_pipeline"', pipeline_config.read_text(encoding="utf-8"))
+            self.assertIn("InferenceRequest", pipeline_model.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

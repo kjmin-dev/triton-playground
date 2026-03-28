@@ -2,6 +2,7 @@ from __future__ import annotations
 
 DEFAULT_WHISPER_MODEL_ID = "whisper_large_v3_turbo"
 DEFAULT_WHISPER_REPOSITORY_MODEL_NAME = "whisper_large_v3_turbo"
+DEFAULT_WHISPER_STT_PIPELINE_REPOSITORY_MODEL_NAME = "whisper_stt_pipeline"
 
 WHISPER_TRITON_BACKEND = "python"
 WHISPER_AUDIO_INPUT = "audio_pcm"
@@ -11,6 +12,12 @@ WHISPER_TASK_INPUT = "task"
 WHISPER_LANGUAGE_INPUT = "language"
 WHISPER_PROMPT_INPUT = "prompt"
 WHISPER_TRANSCRIPT_OUTPUT = "transcript"
+WHISPER_THRESHOLD_INPUT = "threshold"
+WHISPER_MIN_SPEECH_MS_INPUT = "min_speech_ms"
+WHISPER_MIN_SILENCE_MS_INPUT = "min_silence_ms"
+WHISPER_PAD_MS_INPUT = "pad_ms"
+WHISPER_WINDOW_SAMPLES_INPUT = "window_samples"
+WHISPER_SEGMENTS_JSON_OUTPUT = "segments_json"
 
 SUPPORTED_WHISPER_LANGUAGES = ("ko", "en", "ja", "zh")
 SUPPORTED_WHISPER_TASKS = ("transcribe",)
