@@ -102,7 +102,8 @@ curl -X POST "http://localhost:8080/api/stt?threshold=0.5&language=ko" -F "file=
 
 ### TTS — `POST /api/tts`
 
-Text-only synthesis preview (uses default speaker per language, no voice cloning).
+Single-line TTS. The default Base checkpoint requires reference audio for voice cloning. Preset actor TTS and actor previews
+require the optional `Qwen3-TTS-12Hz-0.6B-CustomVoice` checkpoint to be prepared separately.
 
 ### Health — `GET /api/ready`
 

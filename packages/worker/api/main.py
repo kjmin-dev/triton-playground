@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import TypeVar
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 
@@ -37,8 +37,19 @@ from pipeline.triton import (
     TritonVadStreamingClient,
     inspect_model_repository,
 )
-from pipeline.tts import TritonTtsClient, encode_wav_preview, validate_tts_language
-from pipeline.tts_contract import DEFAULT_TTS_MODEL_ID, DEFAULT_TTS_REPOSITORY_MODEL_NAME
+from pipeline.tts import (
+    TritonTtsClient,
+    encode_wav_preview,
+    list_tts_actor_presets,
+    resolve_tts_actor_preset,
+    validate_tts_language,
+)
+from pipeline.tts_contract import (
+    CUSTOM_VOICE_TTS_MODEL_ID,
+    CUSTOM_VOICE_TTS_REPOSITORY_MODEL_NAME,
+    DEFAULT_TTS_MODEL_ID,
+    DEFAULT_TTS_REPOSITORY_MODEL_NAME,
+)
 from pipeline.vad import analyze_vad
 
 logger = logging.getLogger(__name__)
@@ -183,6 +194,26 @@ def _get_stage_model_spec(model_id: str, expected_stage: str):
     return model_spec
 
 
+def _manual_python_runtime_installed(model_name: str) -> bool:
+    model_root = Path(_model_repository_root()) / model_name
+    return (model_root / "config.pbtxt").is_file() and (model_root / "1" / "model.py").is_file()
+
+
+def _custom_voice_tts_model_available() -> bool:
+    if not _manual_python_runtime_installed(CUSTOM_VOICE_TTS_REPOSITORY_MODEL_NAME):
+        return False
+
+    try:
+        readiness = _cached_tts_client(
+            _triton_grpc_url(),
+            CUSTOM_VOICE_TTS_REPOSITORY_MODEL_NAME,
+        ).readiness(detailed=False)
+    except TritonUnavailableError:
+        return False
+
+    return readiness.ready
+
+
 @app.get("/health")
 async def health():
     return {
@@ -232,30 +263,122 @@ def _check_readiness():
     return JSONResponse(status_code=status_code, content=payload)
 
 
+@app.get("/api/tts/actors")
+async def tts_actors(language: str | None = Query(None)):
+    try:
+        actors = [preset.to_dict() for preset in list_tts_actor_presets(language=language)]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    supports_preset_actors = _custom_voice_tts_model_available()
+    preset_actor_message = (
+        None
+        if supports_preset_actors
+        else (
+            "The installed Qwen3-TTS Base checkpoint only supports reference voice cloning. "
+            "Prepare the optional CustomVoice checkpoint to enable preset voice preview and text-only preset voice TTS."
+        )
+    )
+
+    default_actor_id_by_language = {
+        str(actor["language"]): str(actor["actor_id"]) for actor in actors if bool(actor.get("is_default"))
+    }
+    return {
+        "status": "ok",
+        "supports_reference_voice_clone": True,
+        "supports_preset_actors": supports_preset_actors,
+        "preset_actor_model_id": CUSTOM_VOICE_TTS_MODEL_ID if supports_preset_actors else None,
+        "preset_actor_message": preset_actor_message,
+        "default_voice_mode": "preset_voice" if supports_preset_actors else "reference_clone",
+        "voice_modes": [
+            {
+                "mode": "reference_clone",
+                "label": "Reference Voice",
+                "available": True,
+                "description": "Upload a WAV reference clip and clone its voice with the Base checkpoint.",
+            },
+            {
+                "mode": "preset_voice",
+                "label": "Preset Voice Library",
+                "available": supports_preset_actors,
+                "description": (
+                    "Use built-in preset voices from the optional CustomVoice checkpoint."
+                    if supports_preset_actors
+                    else "Preset voices require the optional CustomVoice checkpoint."
+                ),
+            },
+        ],
+        "reference_audio": {
+            "optional": True,
+            "accepted_formats": [".wav", "audio/wav"],
+            "recommended_sample_rate": 16000,
+        },
+        "default_actor_id_by_language": default_actor_id_by_language,
+        "actors": actors,
+    }
+
+
 @app.post("/api/tts")
 async def tts(
     request: Request,
-    text: str = Query(..., min_length=1, max_length=5000),
-    language: str = Query(...),
-    prompt: str | None = Query(None, max_length=200),
-    model: str = Query(DEFAULT_TTS_MODEL_ID),
+    text: str = Form(..., min_length=1, max_length=5000),
+    language: str = Form(...),
+    prompt: str | None = Form(None, max_length=200),
+    actor: str | None = Form(None),
+    model: str = Form(DEFAULT_TTS_MODEL_ID),
+    reference_audio: UploadFile | None = File(None),
 ):
-    model_spec = _get_stage_model_spec(model, "tts")
+    reference_audio_buffer = None
+    reference_audio_filename: str | None = None
+
+    if reference_audio is not None:
+        blob = await reference_audio.read()
+        if not blob:
+            raise HTTPException(status_code=400, detail="uploaded reference audio is empty")
+        try:
+            reference_audio_buffer = resample_audio(decode_wav(blob), target_sample_rate=16000)
+        except UnsupportedAudioError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        reference_audio_filename = reference_audio.filename or "reference.wav"
 
     def _work():
         normalized_language = validate_tts_language(language)
+        if reference_audio_buffer is not None:
+            selected_model_spec = _get_stage_model_spec(DEFAULT_TTS_MODEL_ID, "tts")
+            selected_speaker_name = None
+            actor_preset = None
+            voice_source_label = "Uploaded reference voice"
+        else:
+            actor_preset = resolve_tts_actor_preset(normalized_language, actor)
+            if not _custom_voice_tts_model_available():
+                raise ValueError(
+                    "The installed Qwen3-TTS Base checkpoint only supports reference voice cloning. "
+                    "Upload reference audio or prepare the optional CustomVoice checkpoint for preset voice TTS."
+                )
+            selected_model_spec = _get_stage_model_spec(CUSTOM_VOICE_TTS_MODEL_ID, "tts")
+            selected_speaker_name = actor_preset.speaker_name
+            voice_source_label = actor_preset.label
+
         synthesized = _cached_tts_client(
             _triton_grpc_url(),
-            model_spec.repository_model_name,
+            selected_model_spec.repository_model_name,
         ).synthesize(
             text,
             language=normalized_language,
             speaker_prompt=prompt,
+            speaker_name=selected_speaker_name,
+            ref_audio=reference_audio_buffer.samples if reference_audio_buffer is not None else None,
         )
-        return normalized_language, synthesized
+        return normalized_language, actor_preset, selected_model_spec, synthesized, voice_source_label
 
     try:
-        normalized_language, synthesized = await _run_cancellable(request, _work)
+        (
+            normalized_language,
+            actor_preset,
+            selected_model_spec,
+            synthesized,
+            voice_source_label,
+        ) = await _run_cancellable(request, _work)
     except ClientDisconnectedError:
         return JSONResponse(status_code=499, content={"detail": "Client disconnected"})
     except ValueError as exc:
@@ -265,9 +388,14 @@ async def tts(
 
     return {
         "status": "ok",
-        "model": model,
-        "repository_model_name": model_spec.repository_model_name,
+        "model": selected_model_spec.model_id,
+        "repository_model_name": selected_model_spec.repository_model_name,
         "language": normalized_language,
+        "actor": actor_preset.actor_id if actor_preset is not None else None,
+        "actor_label": actor_preset.label if actor_preset is not None else None,
+        "voice_mode": "reference_clone" if reference_audio_buffer is not None else "preset_actor",
+        "voice_source_label": voice_source_label,
+        "reference_audio_filename": reference_audio_filename,
         "text": text,
         "content_type": "audio/wav",
         "sample_rate": synthesized.sample_rate,

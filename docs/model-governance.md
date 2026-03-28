@@ -56,7 +56,8 @@ A model can enter the catalog only if the source is explicit and the artifact pa
 | `whisper_large_v3_turbo` | `openai/whisper-large-v3-turbo` | MIT | `manual-download + planned-serve` | Validate opt-in runtime. |
 | `madlad400_3b_mt` | `google/madlad400-3b-mt` | Apache 2.0 | `manual-download + planned-serve` | Validate opt-in runtime. |
 | `cosyvoice3_0_5b` | `FunAudioLLM/Fun-CosyVoice3-0.5B-2512` | Apache 2.0 | `manual-download + planned-serve` | Define voice-cloning policy. |
-| `qwen3_tts_0_6b` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | Apache 2.0 | `manual-download + planned-serve` | Validate CustomVoice runtime. |
+| `qwen3_tts_0_6b` | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | Apache 2.0 | `manual-download + planned-serve` | Validate Base voice-clone runtime. |
+| `qwen3_tts_0_6b_custom_voice` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | Apache 2.0 | `manual-download + planned-serve` | Materialize when preset actor TTS is needed. |
 | `bs_roformer` | pending weight provenance review | pending | `hold` | Pin redistributable weight source. |
 
 ## Startup Sequence

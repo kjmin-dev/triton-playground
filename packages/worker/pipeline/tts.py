@@ -25,6 +25,7 @@ from pipeline.tts_contract import (
     TTS_REF_AUDIO_LENGTHS_INPUT,
     TTS_REF_TEXT_INPUT,
     TTS_SAMPLE_RATE_OUTPUT,
+    TTS_SPEAKER_NAME_INPUT,
     TTS_SPEAKER_PROMPT_INPUT,
     TTS_TEXT_INPUT,
 )
@@ -47,9 +48,193 @@ class TtsSynthesisRequest:
     text: str
     language: str
     speaker_prompt: str | None = None
+    speaker_name: str | None = None
     ref_audio: np.ndarray | None = None
     ref_audio_sample_rate: int = 16000
     ref_text: str | None = None
+
+
+@dataclass(frozen=True)
+class TtsActorPreset:
+    actor_id: str
+    label: str
+    language: str
+    speaker_name: str
+    description: str
+    preview_variants: tuple[TtsPreviewVariant, ...]
+    is_default: bool = True
+
+    @property
+    def default_preview(self) -> TtsPreviewVariant:
+        for preview in self.preview_variants:
+            if preview.is_default:
+                return preview
+        if self.preview_variants:
+            return self.preview_variants[0]
+        raise ValueError(f"actor {self.actor_id!r} does not define any preview variants")
+
+    def to_dict(self) -> dict[str, object]:
+        default_preview = self.default_preview
+        return {
+            "actor_id": self.actor_id,
+            "label": self.label,
+            "language": self.language,
+            "speaker_name": self.speaker_name,
+            "description": self.description,
+            "preview_text": default_preview.text,
+            "preview_prompt": default_preview.prompt,
+            "default_preview_id": default_preview.preview_id,
+            "preview_variants": [preview.to_dict() for preview in self.preview_variants],
+            "is_default": self.is_default,
+        }
+
+
+@dataclass(frozen=True)
+class TtsPreviewVariant:
+    preview_id: str
+    label: str
+    emotion: str
+    prompt: str
+    text: str
+    is_default: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "preview_id": self.preview_id,
+            "label": self.label,
+            "emotion": self.emotion,
+            "prompt": self.prompt,
+            "text": self.text,
+            "is_default": self.is_default,
+        }
+
+
+TTS_ACTOR_PRESETS = (
+    TtsActorPreset(
+        actor_id="ryan",
+        label="Ryan",
+        language="en",
+        speaker_name="Ryan",
+        description="English preset actor with a clear neutral delivery.",
+        preview_variants=(
+            TtsPreviewVariant(
+                preview_id="neutral",
+                label="Neutral",
+                emotion="neutral",
+                prompt="clear neutral narration",
+                text="Hello. This is Triton Playground with a neutral voice preview.",
+                is_default=True,
+            ),
+            TtsPreviewVariant(
+                preview_id="warm",
+                label="Warm",
+                emotion="warm",
+                prompt="warm reassuring delivery",
+                text="Thanks for stopping by. This preview uses a warm and reassuring tone.",
+            ),
+            TtsPreviewVariant(
+                preview_id="energetic",
+                label="Energetic",
+                emotion="energetic",
+                prompt="bright energetic performance",
+                text="We are live. This preview pushes a bright and energetic performance.",
+            ),
+        ),
+    ),
+    TtsActorPreset(
+        actor_id="ono_anna",
+        label="Ono Anna",
+        language="ja",
+        speaker_name="Ono_Anna",
+        description="Japanese preset actor tuned for clean conversational lines.",
+        preview_variants=(
+            TtsPreviewVariant(
+                preview_id="neutral",
+                label="Neutral",
+                emotion="neutral",
+                prompt="clear neutral narration",
+                text="こんにちは。Triton Playground の標準ボイスプレビューです。",
+                is_default=True,
+            ),
+            TtsPreviewVariant(
+                preview_id="warm",
+                label="Warm",
+                emotion="warm",
+                prompt="warm reassuring delivery",
+                text="ようこそ。やわらかく安心感のある雰囲気でお届けします。",
+            ),
+            TtsPreviewVariant(
+                preview_id="energetic",
+                label="Energetic",
+                emotion="energetic",
+                prompt="bright energetic performance",
+                text="それでは始めましょう。明るく勢いのあるトーンでご案内します。",
+            ),
+        ),
+    ),
+    TtsActorPreset(
+        actor_id="sohee",
+        label="Sohee",
+        language="ko",
+        speaker_name="Sohee",
+        description="Korean preset actor with a stable bright timbre.",
+        preview_variants=(
+            TtsPreviewVariant(
+                preview_id="neutral",
+                label="Neutral",
+                emotion="neutral",
+                prompt="clear neutral narration",
+                text="안녕하세요. Triton Playground 기본 음성 미리듣기입니다.",
+                is_default=True,
+            ),
+            TtsPreviewVariant(
+                preview_id="warm",
+                label="Warm",
+                emotion="warm",
+                prompt="warm reassuring delivery",
+                text="반갑습니다. 차분하고 따뜻한 분위기로 안내드리겠습니다.",
+            ),
+            TtsPreviewVariant(
+                preview_id="energetic",
+                label="Energetic",
+                emotion="energetic",
+                prompt="bright energetic performance",
+                text="지금 바로 시작합니다. 밝고 힘 있는 톤으로 들려드리겠습니다.",
+            ),
+        ),
+    ),
+    TtsActorPreset(
+        actor_id="vivian",
+        label="Vivian",
+        language="zh",
+        speaker_name="Vivian",
+        description="Chinese preset actor for clear standard Mandarin output.",
+        preview_variants=(
+            TtsPreviewVariant(
+                preview_id="neutral",
+                label="Neutral",
+                emotion="neutral",
+                prompt="clear neutral narration",
+                text="你好，这是 Triton Playground 的标准语音预览。",
+                is_default=True,
+            ),
+            TtsPreviewVariant(
+                preview_id="warm",
+                label="Warm",
+                emotion="warm",
+                prompt="warm reassuring delivery",
+                text="欢迎来到这里。我会用温和而安心的语气来演示这段声音。",
+            ),
+            TtsPreviewVariant(
+                preview_id="energetic",
+                label="Energetic",
+                emotion="energetic",
+                prompt="bright energetic performance",
+                text="现在开始演示。这个版本会用更明亮、更有冲劲的表达方式。",
+            ),
+        ),
+    ),
+)
 
 
 def encode_wav_preview(audio: SynthesizedAudio) -> str:
@@ -75,6 +260,7 @@ class TritonTtsClient:
         text_input_name: str = TTS_TEXT_INPUT,
         language_input_name: str = TTS_LANGUAGE_INPUT,
         speaker_prompt_input_name: str = TTS_SPEAKER_PROMPT_INPUT,
+        speaker_name_input_name: str = TTS_SPEAKER_NAME_INPUT,
         audio_output_name: str = TTS_AUDIO_OUTPUT,
         sample_rate_output_name: str = TTS_SAMPLE_RATE_OUTPUT,
     ) -> None:
@@ -89,12 +275,14 @@ class TritonTtsClient:
         self._text_input_name = text_input_name
         self._language_input_name = language_input_name
         self._speaker_prompt_input_name = speaker_prompt_input_name
+        self._speaker_name_input_name = speaker_name_input_name
         self._ref_audio_input_name = TTS_REF_AUDIO_INPUT
         self._ref_audio_lengths_input_name = TTS_REF_AUDIO_LENGTHS_INPUT
         self._ref_text_input_name = TTS_REF_TEXT_INPUT
         self._audio_output_name = audio_output_name
         self._audio_lengths_output_name = TTS_AUDIO_LENGTHS_OUTPUT
         self._sample_rate_output_name = sample_rate_output_name
+        self._supports_speaker_name_input: bool | None = None
         init_fast_readiness_cache(self)
 
         try:
@@ -113,6 +301,7 @@ class TritonTtsClient:
         *,
         language: str,
         speaker_prompt: str | None = None,
+        speaker_name: str | None = None,
         ref_audio: np.ndarray | None = None,
         ref_audio_sample_rate: int = 16000,
         ref_text: str | None = None,
@@ -123,6 +312,7 @@ class TritonTtsClient:
                     text=text,
                     language=language,
                     speaker_prompt=speaker_prompt,
+                    speaker_name=speaker_name,
                     ref_audio=ref_audio,
                     ref_audio_sample_rate=ref_audio_sample_rate,
                     ref_text=ref_text,
@@ -153,60 +343,32 @@ class TritonTtsClient:
             ref_audio_batch[index, :sample_count] = request.ref_audio.astype(np.float32).reshape(-1)
             ref_audio_lengths[index] = sample_count
 
+        send_speaker_name = self._supports_speaker_name_input is not False
         try:
-            text_input = self._grpcclient.InferInput(self._text_input_name, [len(requests)], "BYTES")
-            text_input.set_data_from_numpy(np.asarray([request.text for request in requests], dtype=object))
-
-            language_input = self._grpcclient.InferInput(self._language_input_name, [len(requests)], "BYTES")
-            language_input.set_data_from_numpy(np.asarray([request.language for request in requests], dtype=object))
-
-            speaker_prompt_input = self._grpcclient.InferInput(
-                self._speaker_prompt_input_name,
-                [len(requests)],
-                "BYTES",
+            result = self._infer_batch(
+                requests,
+                ref_audio_batch=ref_audio_batch,
+                ref_audio_lengths=ref_audio_lengths,
+                send_speaker_name=send_speaker_name,
             )
-            speaker_prompt_input.set_data_from_numpy(
-                np.asarray([request.speaker_prompt or "" for request in requests], dtype=object)
-            )
-
-            ref_audio_input = self._grpcclient.InferInput(
-                self._ref_audio_input_name,
-                list(ref_audio_batch.shape),
-                "FP32",
-            )
-            ref_audio_input.set_data_from_numpy(ref_audio_batch)
-
-            ref_audio_lengths_input = self._grpcclient.InferInput(
-                self._ref_audio_lengths_input_name,
-                [len(requests)],
-                "INT32",
-            )
-            ref_audio_lengths_input.set_data_from_numpy(ref_audio_lengths)
-
-            ref_text_input = self._grpcclient.InferInput(self._ref_text_input_name, [len(requests)], "BYTES")
-            ref_text_input.set_data_from_numpy(
-                np.asarray([request.ref_text or "" for request in requests], dtype=object)
-            )
-
-            result = self._client.infer(
-                self._model_name,
-                [
-                    text_input,
-                    language_input,
-                    speaker_prompt_input,
-                    ref_audio_input,
-                    ref_audio_lengths_input,
-                    ref_text_input,
-                ],
-                outputs=[
-                    self._grpcclient.InferRequestedOutput(self._audio_output_name),
-                    self._grpcclient.InferRequestedOutput(self._audio_lengths_output_name),
-                    self._grpcclient.InferRequestedOutput(self._sample_rate_output_name),
-                ],
-            )
+            if send_speaker_name:
+                self._supports_speaker_name_input = True
         except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
-            invalidate_fast_readiness_cache(self)
-            raise TritonUnavailableError(f"TTS inference request failed: {exc}") from exc
+            if send_speaker_name and _is_stale_speaker_name_contract_error(exc):
+                self._supports_speaker_name_input = False
+                try:
+                    result = self._infer_batch(
+                        requests,
+                        ref_audio_batch=ref_audio_batch,
+                        ref_audio_lengths=ref_audio_lengths,
+                        send_speaker_name=False,
+                    )
+                except Exception as retry_exc:
+                    invalidate_fast_readiness_cache(self)
+                    raise TritonUnavailableError(f"TTS inference request failed: {retry_exc}") from retry_exc
+            else:
+                invalidate_fast_readiness_cache(self)
+                raise TritonUnavailableError(f"TTS inference request failed: {exc}") from exc
 
         audio_tensor = result.as_numpy(self._audio_output_name)
         audio_lengths_tensor = result.as_numpy(self._audio_lengths_output_name)
@@ -250,9 +412,125 @@ class TritonTtsClient:
 
         return synthesized
 
+    def _infer_batch(
+        self,
+        requests: list[TtsSynthesisRequest],
+        *,
+        ref_audio_batch: np.ndarray,
+        ref_audio_lengths: np.ndarray,
+        send_speaker_name: bool,
+    ):
+        text_input = self._grpcclient.InferInput(self._text_input_name, [len(requests)], "BYTES")
+        text_input.set_data_from_numpy(np.asarray([request.text for request in requests], dtype=object))
+
+        language_input = self._grpcclient.InferInput(self._language_input_name, [len(requests)], "BYTES")
+        language_input.set_data_from_numpy(np.asarray([request.language for request in requests], dtype=object))
+
+        speaker_prompt_input = self._grpcclient.InferInput(
+            self._speaker_prompt_input_name,
+            [len(requests)],
+            "BYTES",
+        )
+        speaker_prompt_input.set_data_from_numpy(
+            np.asarray([request.speaker_prompt or "" for request in requests], dtype=object)
+        )
+
+        inputs = [
+            text_input,
+            language_input,
+            speaker_prompt_input,
+        ]
+
+        if send_speaker_name:
+            speaker_name_input = self._grpcclient.InferInput(
+                self._speaker_name_input_name,
+                [len(requests)],
+                "BYTES",
+            )
+            speaker_name_input.set_data_from_numpy(
+                np.asarray([request.speaker_name or "" for request in requests], dtype=object)
+            )
+            inputs.append(speaker_name_input)
+
+        ref_audio_input = self._grpcclient.InferInput(
+            self._ref_audio_input_name,
+            list(ref_audio_batch.shape),
+            "FP32",
+        )
+        ref_audio_input.set_data_from_numpy(ref_audio_batch)
+        inputs.append(ref_audio_input)
+
+        ref_audio_lengths_input = self._grpcclient.InferInput(
+            self._ref_audio_lengths_input_name,
+            [len(requests)],
+            "INT32",
+        )
+        ref_audio_lengths_input.set_data_from_numpy(ref_audio_lengths)
+        inputs.append(ref_audio_lengths_input)
+
+        ref_text_input = self._grpcclient.InferInput(self._ref_text_input_name, [len(requests)], "BYTES")
+        ref_text_input.set_data_from_numpy(np.asarray([request.ref_text or "" for request in requests], dtype=object))
+        inputs.append(ref_text_input)
+
+        return self._client.infer(
+            self._model_name,
+            inputs,
+            outputs=[
+                self._grpcclient.InferRequestedOutput(self._audio_output_name),
+                self._grpcclient.InferRequestedOutput(self._audio_lengths_output_name),
+                self._grpcclient.InferRequestedOutput(self._sample_rate_output_name),
+            ],
+        )
+
+
+def _is_stale_speaker_name_contract_error(exc: Exception) -> bool:
+    detail = str(exc).lower()
+    return "expected 6 inputs but got 7" in detail and "speaker_name" in detail
+
 
 def validate_tts_language(language: str) -> str:
     normalized = normalize_pipeline_language(language, allow_auto=False)
     if normalized is None:
         raise ValueError("language must be explicitly set for TTS")
     return normalized
+
+
+def list_tts_actor_presets(*, language: str | None = None) -> list[TtsActorPreset]:
+    if language is None:
+        return list(TTS_ACTOR_PRESETS)
+
+    normalized_language = validate_tts_language(language)
+    return [preset for preset in TTS_ACTOR_PRESETS if preset.language == normalized_language]
+
+
+def get_default_tts_actor_preset(language: str) -> TtsActorPreset:
+    normalized_language = validate_tts_language(language)
+    for preset in TTS_ACTOR_PRESETS:
+        if preset.language == normalized_language and preset.is_default:
+            return preset
+    raise ValueError(f"no preset actor is configured for language: {normalized_language}")
+
+
+def resolve_tts_preview_variant(actor: TtsActorPreset, preview_id: str | None) -> TtsPreviewVariant:
+    if preview_id is None or not preview_id.strip():
+        return actor.default_preview
+
+    for preview in actor.preview_variants:
+        if preview.preview_id == preview_id:
+            return preview
+
+    raise ValueError(f"actor {actor.actor_id!r} does not define preview variant {preview_id!r}")
+
+
+def resolve_tts_actor_preset(language: str, actor_id: str | None) -> TtsActorPreset:
+    normalized_language = validate_tts_language(language)
+    if actor_id is None or not actor_id.strip():
+        return get_default_tts_actor_preset(normalized_language)
+
+    for preset in TTS_ACTOR_PRESETS:
+        if preset.actor_id == actor_id:
+            if preset.language != normalized_language:
+                raise ValueError(f"actor {actor_id!r} does not support language {normalized_language!r}")
+            return preset
+
+    raise ValueError(f"unknown TTS actor: {actor_id}")

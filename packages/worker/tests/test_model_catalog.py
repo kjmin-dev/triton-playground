@@ -49,6 +49,7 @@ class ModelCatalogTest(unittest.TestCase):
         specs = {spec.model_id: spec for spec in list_model_specs()}
         translation = specs["madlad400_3b_mt"]
         tts = specs["qwen3_tts_0_6b"]
+        custom_voice = specs["qwen3_tts_0_6b_custom_voice"]
 
         self.assertEqual(translation.repository_model_name, "madlad400_3b_mt")
         self.assertEqual(translation.triton_backend, "python")
@@ -70,6 +71,12 @@ class ModelCatalogTest(unittest.TestCase):
         self.assertTrue(any("ref_audio" in spec for spec in tts.triton_inputs))
         self.assertTrue(any("ref_audio_lengths" in spec for spec in tts.triton_inputs))
         self.assertTrue(any("ref_text" in spec for spec in tts.triton_inputs))
+
+        self.assertEqual(custom_voice.repository_model_name, "qwen3_tts_0_6b_custom_voice")
+        self.assertEqual(custom_voice.hf_repo_id, "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
+        self.assertEqual(custom_voice.revision, "85e237c12c027371202489a0ec509ded67b5e4b5")
+        self.assertEqual(custom_voice.runtime_bundle, "localize-runtime")
+        self.assertIn("generate_custom_voice", custom_voice.notes)
 
 
 if __name__ == "__main__":

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 DEFAULT_TTS_MODEL_ID = "qwen3_tts_0_6b"
 DEFAULT_TTS_REPOSITORY_MODEL_NAME = "qwen3_tts_0_6b"
+CUSTOM_VOICE_TTS_MODEL_ID = "qwen3_tts_0_6b_custom_voice"
+CUSTOM_VOICE_TTS_REPOSITORY_MODEL_NAME = "qwen3_tts_0_6b_custom_voice"
 
 TTS_TRITON_BACKEND = "python"
 TTS_TEXT_INPUT = "text"
 TTS_LANGUAGE_INPUT = "language"
 TTS_SPEAKER_PROMPT_INPUT = "speaker_prompt"
+TTS_SPEAKER_NAME_INPUT = "speaker_name"
 TTS_REF_AUDIO_INPUT = "ref_audio"
 TTS_REF_AUDIO_LENGTHS_INPUT = "ref_audio_lengths"
 TTS_REF_TEXT_INPUT = "ref_text"
@@ -20,6 +23,7 @@ TTS_TRITON_INPUT_SPECS = (
     f"{TTS_TEXT_INPUT}: STRING[segments] UTF-8 text to synthesize",
     f"{TTS_LANGUAGE_INPUT}: STRING[segments] required target language code",
     f"{TTS_SPEAKER_PROMPT_INPUT}: STRING[segments] optional prompt for speaking style; empty string means default voice",
+    f"{TTS_SPEAKER_NAME_INPUT}: STRING[segments] optional preset actor name; empty string means language default",
     f"{TTS_REF_AUDIO_INPUT}: FP32[segments, padded_samples] optional reference audio for voice cloning; zeros mean no cloning",
     f"{TTS_REF_AUDIO_LENGTHS_INPUT}: INT32[segments] original sample count for each reference waveform",
     f"{TTS_REF_TEXT_INPUT}: STRING[segments] optional transcript of reference audio for ICL voice cloning; empty string means x-vector only",

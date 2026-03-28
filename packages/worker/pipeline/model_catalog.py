@@ -17,6 +17,7 @@ from pipeline.translation_contract import (
     TRANSLATION_TRITON_OUTPUT_SPECS,
 )
 from pipeline.tts_contract import (
+    CUSTOM_VOICE_TTS_REPOSITORY_MODEL_NAME,
     DEFAULT_TTS_REPOSITORY_MODEL_NAME,
     TTS_TRITON_BACKEND,
     TTS_TRITON_INPUT_SPECS,
@@ -201,8 +202,43 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         next_action="Validate voice cloning quality in /api/localize with reference audio from STT segments.",
         notes=(
             f"{TTS_TRITON_NOTES} The Base checkpoint supports voice cloning via generate_voice_clone with "
-            "reference audio extracted from STT segments. Falls back to predefined speakers when no "
-            "reference audio is provided."
+            "reference audio extracted from STT segments. Preset actor synthesis is handled by the optional "
+            "CustomVoice checkpoint instead of the Base model."
+        ),
+        snapshot_allow_patterns=(
+            "config.json",
+            "generation_config.json",
+            "merges.txt",
+            "model.safetensors",
+            "preprocessor_config.json",
+            "speech_tokenizer/*",
+            "tokenizer_config.json",
+            "vocab.json",
+        ),
+        triton_backend=TTS_TRITON_BACKEND,
+        triton_inputs=TTS_TRITON_INPUT_SPECS,
+        triton_outputs=TTS_TRITON_OUTPUT_SPECS,
+        runtime_bundle="localize-runtime",
+        runtime_pip_packages=(
+            "torch>=2.6,<2.7",
+            "qwen-tts>=0.1.0",
+            "soundfile>=0.13",
+        ),
+    ),
+    "qwen3_tts_0_6b_custom_voice": ModelSpec(
+        model_id="qwen3_tts_0_6b_custom_voice",
+        stage="tts",
+        hf_repo_id="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        revision="85e237c12c027371202489a0ec509ded67b5e4b5",
+        license_name="Apache-2.0",
+        approved_for_auto_download=False,
+        serve_status=MANUAL_PLANNED_LANE,
+        repository_model_name=CUSTOM_VOICE_TTS_REPOSITORY_MODEL_NAME,
+        next_action="Materialize the optional CustomVoice checkpoint when preset actor synthesis is needed.",
+        notes=(
+            f"{TTS_TRITON_NOTES} The CustomVoice checkpoint supports preset speakers via generate_custom_voice "
+            "for actor previews and text-only TTS. Keep it optional so the default localize runtime stays on the "
+            "Base voice-clone checkpoint."
         ),
         snapshot_allow_patterns=(
             "config.json",

@@ -370,6 +370,7 @@ class TritonPythonModel:
                     "speaker_prompt",
                     np.asarray([str(request["speaker_prompt"]) for request in requests], dtype=object),
                 ),
+                pb_utils.Tensor("speaker_name", np.asarray([""] * len(requests), dtype=object)),
                 pb_utils.Tensor("ref_audio", ref_audio_batch),
                 pb_utils.Tensor("ref_audio_lengths", ref_audio_lengths),
                 pb_utils.Tensor(
