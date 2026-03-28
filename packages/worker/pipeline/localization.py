@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections import defaultdict
@@ -11,6 +12,14 @@ from pipeline.audio import AudioBuffer
 from pipeline.diarization import assign_speakers_to_transcribed
 from pipeline.stt import SttAnalysis, TranscribedSegment, _slice_audio, analyze_stt
 from pipeline.translation import TritonTranslationClient, normalize_pipeline_language
+from pipeline.triton import (
+    TritonUnavailableError,
+    check_readiness,
+    describe_triton_error,
+    get_fast_readiness,
+    init_fast_readiness_cache,
+    invalidate_fast_readiness_cache,
+)
 from pipeline.tts import (
     SynthesizedAudio,
     TritonTtsClient,
@@ -20,6 +29,8 @@ from pipeline.tts import (
 )
 
 logger = logging.getLogger(__name__)
+
+LOCALIZE_TEXT_PIPELINE_MODEL_NAME = "localize_text_pipeline"
 
 
 @dataclass(frozen=True)
@@ -33,8 +44,172 @@ class LocalizationStageError(RuntimeError):
         return str(message) if isinstance(message, str) else f"{self.stage} stage failed"
 
 
+@dataclass(frozen=True)
+class LocalizedTextAnalysis:
+    transcript: str
+    translated_text: str
+    segments: list[TranscribedSegment]
+    stt_elapsed_ms: int
+    translation_elapsed_ms: int
+
+
+class TritonLocalizeTextPipelineClient:
+    def __init__(self, url: str, model_name: str = LOCALIZE_TEXT_PIPELINE_MODEL_NAME) -> None:
+        try:
+            import tritonclient.grpc as grpcclient
+        except ImportError as exc:
+            raise TritonUnavailableError("tritonclient[grpc] is not installed.") from exc
+
+        self._grpcclient = grpcclient
+        self._url = url
+        self._model_name = model_name
+        init_fast_readiness_cache(self)
+
+        try:
+            self._client = grpcclient.InferenceServerClient(url=url, verbose=False)
+        except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
+            raise TritonUnavailableError(
+                describe_triton_error(url=url, action="Creating the Triton client", exc=exc)
+            ) from exc
+
+    def readiness(self, *, refresh: bool = False, detailed: bool = True):
+        if detailed:
+            return check_readiness(self._client, self._url, self._model_name)
+        return get_fast_readiness(self, self._client, url=self._url, model_name=self._model_name, refresh=refresh)
+
+    def localize_text(
+        self,
+        *,
+        audio: AudioBuffer,
+        threshold: float,
+        source_language: str | None,
+        target_language: str,
+        prompt: str | None = None,
+        min_speech_ms: int = 160,
+        min_silence_ms: int = 240,
+        pad_ms: int = 80,
+        window_samples: int = 512,
+    ) -> LocalizedTextAnalysis:
+        readiness = self.readiness(detailed=False)
+        if not readiness.ready:
+            raise TritonUnavailableError(readiness.summary)
+
+        try:
+            audio_input = self._grpcclient.InferInput("audio_pcm", [1, len(audio.samples)], "FP32")
+            audio_input.set_data_from_numpy(audio.samples.reshape(1, -1).astype(np.float32))
+
+            sample_rate_input = self._grpcclient.InferInput("sample_rate", [1], "INT32")
+            sample_rate_input.set_data_from_numpy(np.asarray([audio.sample_rate], dtype=np.int32))
+
+            threshold_input = self._grpcclient.InferInput("threshold", [1], "FP32")
+            threshold_input.set_data_from_numpy(np.asarray([threshold], dtype=np.float32))
+
+            min_speech_ms_input = self._grpcclient.InferInput("min_speech_ms", [1], "INT32")
+            min_speech_ms_input.set_data_from_numpy(np.asarray([min_speech_ms], dtype=np.int32))
+
+            min_silence_ms_input = self._grpcclient.InferInput("min_silence_ms", [1], "INT32")
+            min_silence_ms_input.set_data_from_numpy(np.asarray([min_silence_ms], dtype=np.int32))
+
+            pad_ms_input = self._grpcclient.InferInput("pad_ms", [1], "INT32")
+            pad_ms_input.set_data_from_numpy(np.asarray([pad_ms], dtype=np.int32))
+
+            window_samples_input = self._grpcclient.InferInput("window_samples", [1], "INT32")
+            window_samples_input.set_data_from_numpy(np.asarray([window_samples], dtype=np.int32))
+
+            source_language_input = self._grpcclient.InferInput("source_language", [1], "BYTES")
+            source_language_input.set_data_from_numpy(np.asarray([source_language or ""], dtype=object))
+
+            target_language_input = self._grpcclient.InferInput("target_language", [1], "BYTES")
+            target_language_input.set_data_from_numpy(np.asarray([target_language], dtype=object))
+
+            prompt_input = self._grpcclient.InferInput("prompt", [1], "BYTES")
+            prompt_input.set_data_from_numpy(np.asarray([prompt or ""], dtype=object))
+
+            result = self._client.infer(
+                self._model_name,
+                [
+                    audio_input,
+                    sample_rate_input,
+                    threshold_input,
+                    min_speech_ms_input,
+                    min_silence_ms_input,
+                    pad_ms_input,
+                    window_samples_input,
+                    source_language_input,
+                    target_language_input,
+                    prompt_input,
+                ],
+                outputs=[
+                    self._grpcclient.InferRequestedOutput("transcript"),
+                    self._grpcclient.InferRequestedOutput("segments_json"),
+                    self._grpcclient.InferRequestedOutput("translated_text"),
+                    self._grpcclient.InferRequestedOutput("stt_elapsed_ms"),
+                    self._grpcclient.InferRequestedOutput("translation_elapsed_ms"),
+                ],
+            )
+        except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
+            invalidate_fast_readiness_cache(self)
+            raise TritonUnavailableError(
+                describe_triton_error(url=self._url, action="Running localize text pipeline", exc=exc)
+            ) from exc
+
+        transcript_tensor = result.as_numpy("transcript")
+        segments_tensor = result.as_numpy("segments_json")
+        translated_text_tensor = result.as_numpy("translated_text")
+        stt_elapsed_ms_tensor = result.as_numpy("stt_elapsed_ms")
+        translation_elapsed_ms_tensor = result.as_numpy("translation_elapsed_ms")
+        if (
+            transcript_tensor is None
+            or segments_tensor is None
+            or translated_text_tensor is None
+            or stt_elapsed_ms_tensor is None
+            or translation_elapsed_ms_tensor is None
+        ):
+            raise TritonUnavailableError("Localize text pipeline did not return the expected output tensors.")
+
+        transcript = _decode_bytes_tensor(transcript_tensor)
+        translated_text = _decode_bytes_tensor(translated_text_tensor)
+        raw_segments = json.loads(_decode_bytes_tensor(segments_tensor) or "[]")
+        segments = [
+            TranscribedSegment(
+                start_ms=int(segment["start_ms"]),
+                end_ms=int(segment["end_ms"]),
+                duration_ms=int(segment["duration_ms"]),
+                average_probability=float(segment["average_probability"]),
+                peak_probability=float(segment["peak_probability"]),
+                text=str(segment.get("text", "")),
+                speaker_id=segment.get("speaker_id"),
+            )
+            for segment in raw_segments
+        ]
+
+        return LocalizedTextAnalysis(
+            transcript=transcript,
+            translated_text=translated_text,
+            segments=segments,
+            stt_elapsed_ms=int(np.asarray(stt_elapsed_ms_tensor).reshape(-1)[0]),
+            translation_elapsed_ms=int(np.asarray(translation_elapsed_ms_tensor).reshape(-1)[0]),
+        )
+
+
 _REF_MIN_DURATION_MS = 2000
 _REF_MAX_DURATION_MS = 10000
+
+
+def _decode_bytes_tensor(tensor: np.ndarray | None) -> str:
+    if tensor is None:
+        return ""
+
+    flattened = tensor.reshape(-1)
+    if flattened.size == 0:
+        return ""
+
+    value = flattened[0].item() if hasattr(flattened[0], "item") else flattened[0]
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, str):
+        return value
+    return str(value)
 
 
 def _select_reference_segment(
@@ -228,6 +403,7 @@ def localize_audio(
     stt_model: str,
     translation_model: str,
     tts_model: str,
+    localize_text_client: TritonLocalizeTextPipelineClient | None = None,
     vad_client,
     stt_client,
     translation_client: TritonTranslationClient,
@@ -252,34 +428,65 @@ def localize_audio(
     # ── STT stage ──
     stt_analysis: SttAnalysis
     t0 = time.monotonic()
-    try:
-        stt_analysis = analyze_stt(
-            audio=audio,
-            vad_client=vad_client,
-            stt_client=stt_client,
-            threshold=threshold,
-            language=normalized_source_language,
-            prompt=prompt,
-        )
-    except ValueError:
-        raise
-    except Exception as exc:
-        raise LocalizationStageError(
-            stage="stt",
-            payload={
-                "status": "error",
-                **base_payload,
-                "stage": "stt",
-                "message": f"STT stage failed: {exc}",
-                "stages": {
-                    "stt": {"status": "error", "message": str(exc)},
-                    "translation": {"status": "blocked"},
-                    "tts": {"status": "blocked"},
-                },
-            },
-        ) from exc
+    translated_text_from_pipeline: str | None = None
+    translation_elapsed_ms: int | None = None
+    localized_text: LocalizedTextAnalysis | None = None
+    if localize_text_client is not None:
+        try:
+            localized_text = localize_text_client.localize_text(
+                audio=audio,
+                threshold=threshold,
+                source_language=normalized_source_language,
+                target_language=normalized_target_language,
+                prompt=prompt,
+            )
+        except Exception:
+            logger.warning("Triton localize text pipeline failed, falling back to worker orchestration", exc_info=True)
+            localized_text = None
 
-    stt_elapsed_ms = round((time.monotonic() - t0) * 1000)
+    if localized_text is not None:
+        stt_analysis = SttAnalysis(
+            threshold=threshold,
+            task="transcribe",
+            language=normalized_source_language or "auto",
+            duration_ms=audio.duration_ms,
+            sample_rate=audio.sample_rate,
+            transcript=localized_text.transcript,
+            segments=localized_text.segments,
+        )
+        translated_text_from_pipeline = localized_text.translated_text
+        stt_elapsed_ms = localized_text.stt_elapsed_ms
+        translation_elapsed_ms = localized_text.translation_elapsed_ms
+    else:
+        try:
+            stt_analysis = analyze_stt(
+                audio=audio,
+                vad_client=vad_client,
+                stt_client=stt_client,
+                threshold=threshold,
+                language=normalized_source_language,
+                prompt=prompt,
+            )
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise LocalizationStageError(
+                stage="stt",
+                payload={
+                    "status": "error",
+                    **base_payload,
+                    "stage": "stt",
+                    "message": f"STT stage failed: {exc}",
+                    "stages": {
+                        "stt": {"status": "error", "message": str(exc)},
+                        "translation": {"status": "blocked"},
+                        "tts": {"status": "blocked"},
+                    },
+                },
+            ) from exc
+
+        stt_elapsed_ms = round((time.monotonic() - t0) * 1000)
+
     logger.info("STT completed in %d ms (%d segments)", stt_elapsed_ms, len(stt_analysis.segments))
 
     # ── Speaker diarization ──
@@ -330,30 +537,33 @@ def localize_audio(
         return payload
 
     # ── Translation stage ──
-    t0 = time.monotonic()
-    try:
-        translated_text = translation_client.translate(
-            stt_analysis.transcript,
-            source_language=normalized_source_language,
-            target_language=normalized_target_language,
-        ).strip()
-    except Exception as exc:
-        raise LocalizationStageError(
-            stage="translation",
-            payload={
-                "status": "error",
-                **payload,
-                "stage": "translation",
-                "message": f"Translation stage failed: {exc}",
-                "stages": {
-                    **payload["stages"],
-                    "translation": {"status": "error", "message": str(exc)},
-                    "tts": {"status": "blocked"},
+    if translated_text_from_pipeline is not None and translation_elapsed_ms is not None:
+        translated_text = translated_text_from_pipeline.strip()
+    else:
+        t0 = time.monotonic()
+        try:
+            translated_text = translation_client.translate(
+                stt_analysis.transcript,
+                source_language=normalized_source_language,
+                target_language=normalized_target_language,
+            ).strip()
+        except Exception as exc:
+            raise LocalizationStageError(
+                stage="translation",
+                payload={
+                    "status": "error",
+                    **payload,
+                    "stage": "translation",
+                    "message": f"Translation stage failed: {exc}",
+                    "stages": {
+                        **payload["stages"],
+                        "translation": {"status": "error", "message": str(exc)},
+                        "tts": {"status": "blocked"},
+                    },
                 },
-            },
-        ) from exc
+            ) from exc
 
-    translation_elapsed_ms = round((time.monotonic() - t0) * 1000)
+        translation_elapsed_ms = round((time.monotonic() - t0) * 1000)
     logger.info("Translation completed in %d ms", translation_elapsed_ms)
 
     payload["translated_text"] = translated_text

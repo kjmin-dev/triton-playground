@@ -13,7 +13,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from pipeline.audio import UnsupportedAudioError, decode_wav, resample_audio
-from pipeline.localization import LocalizationStageError, localize_audio
+from pipeline.localization import (
+    LocalizationStageError,
+    TritonLocalizeTextPipelineClient,
+    localize_audio,
+)
 from pipeline.model_catalog import get_model_spec, get_profile_model_ids, list_model_specs
 from pipeline.runtime_status import TritonReadiness, build_ready_payload
 from pipeline.stt import (
@@ -25,7 +29,7 @@ from pipeline.stt import (
 from pipeline.stt_contract import DEFAULT_WHISPER_MODEL_ID, DEFAULT_WHISPER_REPOSITORY_MODEL_NAME
 from pipeline.subtitles import segments_to_csv, segments_to_srt, segments_to_vtt
 from pipeline.translation import TritonTranslationClient
-from pipeline.translation_contract import DEFAULT_TRANSLATION_MODEL_ID
+from pipeline.translation_contract import DEFAULT_TRANSLATION_MODEL_ID, DEFAULT_TRANSLATION_REPOSITORY_MODEL_NAME
 from pipeline.triton import (
     TritonUnavailableError,
     TritonVadClient,
@@ -138,6 +142,19 @@ def _cached_translation_client(url: str, model_name: str) -> TritonTranslationCl
 @functools.lru_cache(maxsize=4)
 def _cached_tts_client(url: str, model_name: str) -> TritonTtsClient:
     return TritonTtsClient(url=url, model_name=model_name)
+
+
+@functools.lru_cache(maxsize=4)
+def _cached_localize_text_client(url: str):
+    try:
+        client = TritonLocalizeTextPipelineClient(url=url)
+        readiness = client.readiness()
+        if readiness.ready:
+            logger.info("Using Triton localize text pipeline client (STT + translation in one gRPC call)")
+            return client
+    except TritonUnavailableError:
+        pass
+    return None
 
 
 def _get_stage_model_spec(model_id: str, expected_stage: str):
@@ -330,6 +347,13 @@ async def localize(
     audio = resample_audio(decode_wav(blob), target_sample_rate=16000)
 
     def _work():
+        localize_text_client = None
+        if (
+            stt_spec.repository_model_name == DEFAULT_WHISPER_REPOSITORY_MODEL_NAME
+            and translation_spec.repository_model_name == DEFAULT_TRANSLATION_REPOSITORY_MODEL_NAME
+        ):
+            localize_text_client = _cached_localize_text_client(_triton_grpc_url())
+
         return localize_audio(
             audio=audio,
             threshold=threshold,
@@ -340,6 +364,7 @@ async def localize(
             stt_model=stt_model,
             translation_model=translation_model,
             tts_model=tts_model,
+            localize_text_client=localize_text_client,
             vad_client=_cached_vad_client(_triton_grpc_url()),
             stt_client=_cached_stt_client(_triton_grpc_url(), stt_spec.repository_model_name),
             translation_client=_cached_translation_client(_triton_grpc_url(), translation_spec.repository_model_name),

@@ -330,6 +330,7 @@ def prepare_model_repository(
     _write_vad_cpu_config(output_root)
     _materialize_vad_streaming(output_root)
     _materialize_whisper_stt_pipeline(output_root)
+    _materialize_localize_text_pipeline(output_root)
 
     return manifest
 
@@ -518,6 +519,141 @@ def _materialize_whisper_stt_pipeline(output_root: Path) -> None:
     (model_root / "config.pbtxt").write_text(config, encoding="utf-8")
 
     template = _BACKEND_TEMPLATE_ROOT / "whisper_stt_pipeline.py"
+    if template.is_file():
+        (version_root / "model.py").write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def _materialize_localize_text_pipeline(output_root: Path) -> None:
+    """Create a Triton BLS pipeline that runs STT + translation inside the server."""
+    stt_pipeline_backend = output_root / "whisper_stt_pipeline" / "1" / "model.py"
+    translation_backend = output_root / "madlad400_3b_mt" / "1" / "model.py"
+    if not stt_pipeline_backend.is_file() or not translation_backend.is_file():
+        return
+
+    model_root = output_root / "localize_text_pipeline"
+    version_root = model_root / "1"
+    version_root.mkdir(parents=True, exist_ok=True)
+
+    config = dedent("""\
+        name: "localize_text_pipeline"
+        backend: "python"
+        max_batch_size: 0
+        instance_group [
+          {
+            kind: KIND_CPU
+            count: 1
+          }
+        ]
+
+        input [
+          {
+            name: "audio_pcm"
+            data_type: TYPE_FP32
+            dims: [ 1, -1 ]
+          }
+        ]
+        input [
+          {
+            name: "sample_rate"
+            data_type: TYPE_INT32
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "threshold"
+            data_type: TYPE_FP32
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "min_speech_ms"
+            data_type: TYPE_INT32
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "min_silence_ms"
+            data_type: TYPE_INT32
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "pad_ms"
+            data_type: TYPE_INT32
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "window_samples"
+            data_type: TYPE_INT32
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "source_language"
+            data_type: TYPE_STRING
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "target_language"
+            data_type: TYPE_STRING
+            dims: [ 1 ]
+          }
+        ]
+        input [
+          {
+            name: "prompt"
+            data_type: TYPE_STRING
+            dims: [ 1 ]
+          }
+        ]
+        output [
+          {
+            name: "transcript"
+            data_type: TYPE_STRING
+            dims: [ 1 ]
+          }
+        ]
+        output [
+          {
+            name: "segments_json"
+            data_type: TYPE_STRING
+            dims: [ 1 ]
+          }
+        ]
+        output [
+          {
+            name: "translated_text"
+            data_type: TYPE_STRING
+            dims: [ 1 ]
+          }
+        ]
+        output [
+          {
+            name: "stt_elapsed_ms"
+            data_type: TYPE_INT32
+            dims: [ 1 ]
+          }
+        ]
+        output [
+          {
+            name: "translation_elapsed_ms"
+            data_type: TYPE_INT32
+            dims: [ 1 ]
+          }
+        ]
+    """)
+    (model_root / "config.pbtxt").write_text(config, encoding="utf-8")
+
+    template = _BACKEND_TEMPLATE_ROOT / "localize_text_pipeline.py"
     if template.is_file():
         (version_root / "model.py").write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
 

@@ -195,6 +195,25 @@ class PrepareModelsTest(unittest.TestCase):
             self.assertIn('name: "whisper_stt_pipeline"', pipeline_config.read_text(encoding="utf-8"))
             self.assertIn("InferenceRequest", pipeline_model.read_text(encoding="utf-8"))
 
+    def test_materialize_localize_text_pipeline_when_stt_pipeline_and_translation_are_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = Path(temp_dir)
+            stt_pipeline_root = output_root / "whisper_stt_pipeline" / "1"
+            translation_root = output_root / "madlad400_3b_mt" / "1"
+            stt_pipeline_root.mkdir(parents=True)
+            translation_root.mkdir(parents=True)
+            (stt_pipeline_root / "model.py").write_text("# stt pipeline\n", encoding="utf-8")
+            (translation_root / "model.py").write_text("# translation backend\n", encoding="utf-8")
+
+            prepare_models_module._materialize_localize_text_pipeline(output_root)
+
+            pipeline_config = output_root / "localize_text_pipeline" / "config.pbtxt"
+            pipeline_model = output_root / "localize_text_pipeline" / "1" / "model.py"
+            self.assertTrue(pipeline_config.exists())
+            self.assertTrue(pipeline_model.exists())
+            self.assertIn('name: "localize_text_pipeline"', pipeline_config.read_text(encoding="utf-8"))
+            self.assertIn("translation_elapsed_ms", pipeline_model.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
