@@ -30,6 +30,7 @@ from pipeline.tts import (
 
 logger = logging.getLogger(__name__)
 
+LOCALIZE_PIPELINE_MODEL_NAME = "localize_pipeline"
 LOCALIZE_TEXT_PIPELINE_MODEL_NAME = "localize_text_pipeline"
 
 
@@ -51,6 +52,18 @@ class LocalizedTextAnalysis:
     segments: list[TranscribedSegment]
     stt_elapsed_ms: int
     translation_elapsed_ms: int
+
+
+@dataclass(frozen=True)
+class LocalizedAudioAnalysis:
+    transcript: str
+    translated_text: str
+    segments: list[TranscribedSegment]
+    stt_elapsed_ms: int
+    translation_elapsed_ms: int
+    tts_elapsed_ms: int
+    synthesized_audio: SynthesizedAudio | None
+    tts_meta: dict[str, object]
 
 
 class TritonLocalizeTextPipelineClient:
@@ -169,19 +182,7 @@ class TritonLocalizeTextPipelineClient:
 
         transcript = _decode_bytes_tensor(transcript_tensor)
         translated_text = _decode_bytes_tensor(translated_text_tensor)
-        raw_segments = json.loads(_decode_bytes_tensor(segments_tensor) or "[]")
-        segments = [
-            TranscribedSegment(
-                start_ms=int(segment["start_ms"]),
-                end_ms=int(segment["end_ms"]),
-                duration_ms=int(segment["duration_ms"]),
-                average_probability=float(segment["average_probability"]),
-                peak_probability=float(segment["peak_probability"]),
-                text=str(segment.get("text", "")),
-                speaker_id=segment.get("speaker_id"),
-            )
-            for segment in raw_segments
-        ]
+        segments = _segments_from_json_payload(_decode_bytes_tensor(segments_tensor))
 
         return LocalizedTextAnalysis(
             transcript=transcript,
@@ -189,6 +190,168 @@ class TritonLocalizeTextPipelineClient:
             segments=segments,
             stt_elapsed_ms=int(np.asarray(stt_elapsed_ms_tensor).reshape(-1)[0]),
             translation_elapsed_ms=int(np.asarray(translation_elapsed_ms_tensor).reshape(-1)[0]),
+        )
+
+
+class TritonLocalizePipelineClient:
+    def __init__(self, url: str, model_name: str = LOCALIZE_PIPELINE_MODEL_NAME) -> None:
+        try:
+            import tritonclient.grpc as grpcclient
+        except ImportError as exc:
+            raise TritonUnavailableError("tritonclient[grpc] is not installed.") from exc
+
+        self._grpcclient = grpcclient
+        self._url = url
+        self._model_name = model_name
+        init_fast_readiness_cache(self)
+
+        try:
+            self._client = grpcclient.InferenceServerClient(url=url, verbose=False)
+        except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
+            raise TritonUnavailableError(
+                describe_triton_error(url=url, action="Creating the Triton client", exc=exc)
+            ) from exc
+
+    def readiness(self, *, refresh: bool = False, detailed: bool = True):
+        if detailed:
+            return check_readiness(self._client, self._url, self._model_name)
+        return get_fast_readiness(self, self._client, url=self._url, model_name=self._model_name, refresh=refresh)
+
+    def localize(
+        self,
+        *,
+        audio: AudioBuffer,
+        threshold: float,
+        source_language: str | None,
+        target_language: str,
+        prompt: str | None = None,
+        speaker_prompt: str | None = None,
+        min_speech_ms: int = 160,
+        min_silence_ms: int = 240,
+        pad_ms: int = 80,
+        window_samples: int = 512,
+    ) -> LocalizedAudioAnalysis:
+        readiness = self.readiness(detailed=False)
+        if not readiness.ready:
+            raise TritonUnavailableError(readiness.summary)
+
+        try:
+            audio_input = self._grpcclient.InferInput("audio_pcm", [1, len(audio.samples)], "FP32")
+            audio_input.set_data_from_numpy(audio.samples.reshape(1, -1).astype(np.float32))
+
+            sample_rate_input = self._grpcclient.InferInput("sample_rate", [1], "INT32")
+            sample_rate_input.set_data_from_numpy(np.asarray([audio.sample_rate], dtype=np.int32))
+
+            threshold_input = self._grpcclient.InferInput("threshold", [1], "FP32")
+            threshold_input.set_data_from_numpy(np.asarray([threshold], dtype=np.float32))
+
+            min_speech_ms_input = self._grpcclient.InferInput("min_speech_ms", [1], "INT32")
+            min_speech_ms_input.set_data_from_numpy(np.asarray([min_speech_ms], dtype=np.int32))
+
+            min_silence_ms_input = self._grpcclient.InferInput("min_silence_ms", [1], "INT32")
+            min_silence_ms_input.set_data_from_numpy(np.asarray([min_silence_ms], dtype=np.int32))
+
+            pad_ms_input = self._grpcclient.InferInput("pad_ms", [1], "INT32")
+            pad_ms_input.set_data_from_numpy(np.asarray([pad_ms], dtype=np.int32))
+
+            window_samples_input = self._grpcclient.InferInput("window_samples", [1], "INT32")
+            window_samples_input.set_data_from_numpy(np.asarray([window_samples], dtype=np.int32))
+
+            source_language_input = self._grpcclient.InferInput("source_language", [1], "BYTES")
+            source_language_input.set_data_from_numpy(np.asarray([source_language or ""], dtype=object))
+
+            target_language_input = self._grpcclient.InferInput("target_language", [1], "BYTES")
+            target_language_input.set_data_from_numpy(np.asarray([target_language], dtype=object))
+
+            prompt_input = self._grpcclient.InferInput("prompt", [1], "BYTES")
+            prompt_input.set_data_from_numpy(np.asarray([prompt or ""], dtype=object))
+
+            speaker_prompt_input = self._grpcclient.InferInput("speaker_prompt", [1], "BYTES")
+            speaker_prompt_input.set_data_from_numpy(np.asarray([speaker_prompt or ""], dtype=object))
+
+            result = self._client.infer(
+                self._model_name,
+                [
+                    audio_input,
+                    sample_rate_input,
+                    threshold_input,
+                    min_speech_ms_input,
+                    min_silence_ms_input,
+                    pad_ms_input,
+                    window_samples_input,
+                    source_language_input,
+                    target_language_input,
+                    prompt_input,
+                    speaker_prompt_input,
+                ],
+                outputs=[
+                    self._grpcclient.InferRequestedOutput("transcript"),
+                    self._grpcclient.InferRequestedOutput("segments_json"),
+                    self._grpcclient.InferRequestedOutput("translated_text"),
+                    self._grpcclient.InferRequestedOutput("stt_elapsed_ms"),
+                    self._grpcclient.InferRequestedOutput("translation_elapsed_ms"),
+                    self._grpcclient.InferRequestedOutput("tts_elapsed_ms"),
+                    self._grpcclient.InferRequestedOutput("audio_pcm"),
+                    self._grpcclient.InferRequestedOutput("audio_length"),
+                    self._grpcclient.InferRequestedOutput("synthesized_sample_rate"),
+                    self._grpcclient.InferRequestedOutput("tts_meta_json"),
+                ],
+            )
+        except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
+            invalidate_fast_readiness_cache(self)
+            raise TritonUnavailableError(
+                describe_triton_error(url=self._url, action="Running localize pipeline", exc=exc)
+            ) from exc
+
+        transcript_tensor = result.as_numpy("transcript")
+        segments_tensor = result.as_numpy("segments_json")
+        translated_text_tensor = result.as_numpy("translated_text")
+        stt_elapsed_ms_tensor = result.as_numpy("stt_elapsed_ms")
+        translation_elapsed_ms_tensor = result.as_numpy("translation_elapsed_ms")
+        tts_elapsed_ms_tensor = result.as_numpy("tts_elapsed_ms")
+        audio_tensor = result.as_numpy("audio_pcm")
+        audio_length_tensor = result.as_numpy("audio_length")
+        synthesized_sample_rate_tensor = result.as_numpy("synthesized_sample_rate")
+        tts_meta_tensor = result.as_numpy("tts_meta_json")
+        if (
+            transcript_tensor is None
+            or segments_tensor is None
+            or translated_text_tensor is None
+            or stt_elapsed_ms_tensor is None
+            or translation_elapsed_ms_tensor is None
+            or tts_elapsed_ms_tensor is None
+            or audio_tensor is None
+            or audio_length_tensor is None
+            or synthesized_sample_rate_tensor is None
+            or tts_meta_tensor is None
+        ):
+            raise TritonUnavailableError("Localize pipeline did not return the expected output tensors.")
+
+        transcript = _decode_bytes_tensor(transcript_tensor)
+        translated_text = _decode_bytes_tensor(translated_text_tensor)
+        segments = _segments_from_json_payload(_decode_bytes_tensor(segments_tensor))
+        tts_meta = json.loads(_decode_bytes_tensor(tts_meta_tensor) or "{}")
+
+        audio_length = int(np.asarray(audio_length_tensor).reshape(-1)[0])
+        synthesized_audio = None
+        if audio_length > 0:
+            sample_rate = int(np.asarray(synthesized_sample_rate_tensor).reshape(-1)[0])
+            if sample_rate <= 0:
+                raise TritonUnavailableError(
+                    f"Localize pipeline returned an invalid synthesized sample rate: {sample_rate}"
+                )
+            waveform = np.asarray(audio_tensor, dtype=np.float32).reshape(-1)[:audio_length]
+            synthesized_audio = SynthesizedAudio(sample_rate=sample_rate, samples=waveform.astype(np.float32))
+
+        return LocalizedAudioAnalysis(
+            transcript=transcript,
+            translated_text=translated_text,
+            segments=segments,
+            stt_elapsed_ms=int(np.asarray(stt_elapsed_ms_tensor).reshape(-1)[0]),
+            translation_elapsed_ms=int(np.asarray(translation_elapsed_ms_tensor).reshape(-1)[0]),
+            tts_elapsed_ms=int(np.asarray(tts_elapsed_ms_tensor).reshape(-1)[0]),
+            synthesized_audio=synthesized_audio,
+            tts_meta=tts_meta if isinstance(tts_meta, dict) else {},
         )
 
 
@@ -210,6 +373,22 @@ def _decode_bytes_tensor(tensor: np.ndarray | None) -> str:
     if isinstance(value, str):
         return value
     return str(value)
+
+
+def _segments_from_json_payload(payload: str) -> list[TranscribedSegment]:
+    raw_segments = json.loads(payload or "[]")
+    return [
+        TranscribedSegment(
+            start_ms=int(segment["start_ms"]),
+            end_ms=int(segment["end_ms"]),
+            duration_ms=int(segment["duration_ms"]),
+            average_probability=float(segment["average_probability"]),
+            peak_probability=float(segment["peak_probability"]),
+            text=str(segment.get("text", "")),
+            speaker_id=segment.get("speaker_id"),
+        )
+        for segment in raw_segments
+    ]
 
 
 def _select_reference_segment(
@@ -294,8 +473,6 @@ def _synthesize_time_aligned(
     TTS output is stretched/compressed to fit the original segment's time slot,
     with silence filling the gaps between segments.
     """
-    total_samples = int(audio.duration_ms * audio.sample_rate / 1000)
-    output = np.zeros(total_samples, dtype=np.float32)
     sample_rate: int | None = None
 
     # Build per-speaker reference cache
@@ -353,25 +530,29 @@ def _synthesize_time_aligned(
                 continue
             synthesized_segments.append((seg, synth))
 
+    if sample_rate is None:
+        for _, synth in synthesized_segments:
+            sample_rate = synth.sample_rate
+            break
+    if sample_rate is None:
+        sample_rate = 24000
+
+    total_samples = int(audio.duration_ms * sample_rate / 1000)
+    output = np.zeros(total_samples, dtype=np.float32)
+
     segments_synthesized = 0
     for seg, synth in synthesized_segments:
-        if sample_rate is None:
-            sample_rate = synth.sample_rate
-
         # Time-stretch TTS output to fit the original segment duration
-        target_samples = int(seg.duration_ms * (sample_rate or 24000) / 1000)
+        target_samples = int(seg.duration_ms * sample_rate / 1000)
         stretched = _time_stretch(synth.samples, target_samples)
 
         # Place into output at the segment's original position
-        start_sample = int(seg.start_ms * (sample_rate or 24000) / 1000)
+        start_sample = int(seg.start_ms * sample_rate / 1000)
         end_sample = min(start_sample + len(stretched), len(output))
         fit_len = end_sample - start_sample
         if fit_len > 0:
             output[start_sample:end_sample] = stretched[:fit_len]
         segments_synthesized += 1
-
-    if sample_rate is None:
-        sample_rate = 24000
 
     # Trim trailing silence
     last_seg = max(diarized_segments, key=lambda s: s.end_ms) if diarized_segments else None
@@ -403,6 +584,7 @@ def localize_audio(
     stt_model: str,
     translation_model: str,
     tts_model: str,
+    localize_pipeline_client: TritonLocalizePipelineClient | None = None,
     localize_text_client: TritonLocalizeTextPipelineClient | None = None,
     vad_client,
     stt_client,
@@ -430,8 +612,23 @@ def localize_audio(
     t0 = time.monotonic()
     translated_text_from_pipeline: str | None = None
     translation_elapsed_ms: int | None = None
+    localized_audio: LocalizedAudioAnalysis | None = None
     localized_text: LocalizedTextAnalysis | None = None
-    if localize_text_client is not None:
+    if localize_pipeline_client is not None:
+        try:
+            localized_audio = localize_pipeline_client.localize(
+                audio=audio,
+                threshold=threshold,
+                source_language=normalized_source_language,
+                target_language=normalized_target_language,
+                prompt=prompt,
+                speaker_prompt=speaker_prompt,
+            )
+        except Exception:
+            logger.warning("Triton localize pipeline failed, falling back to worker orchestration", exc_info=True)
+            localized_audio = None
+
+    if localized_audio is None and localize_text_client is not None:
         try:
             localized_text = localize_text_client.localize_text(
                 audio=audio,
@@ -444,7 +641,20 @@ def localize_audio(
             logger.warning("Triton localize text pipeline failed, falling back to worker orchestration", exc_info=True)
             localized_text = None
 
-    if localized_text is not None:
+    if localized_audio is not None:
+        stt_analysis = SttAnalysis(
+            threshold=threshold,
+            task="transcribe",
+            language=normalized_source_language or "auto",
+            duration_ms=audio.duration_ms,
+            sample_rate=audio.sample_rate,
+            transcript=localized_audio.transcript,
+            segments=localized_audio.segments,
+        )
+        translated_text_from_pipeline = localized_audio.translated_text
+        stt_elapsed_ms = localized_audio.stt_elapsed_ms
+        translation_elapsed_ms = localized_audio.translation_elapsed_ms
+    elif localized_text is not None:
         stt_analysis = SttAnalysis(
             threshold=threshold,
             task="transcribe",
@@ -490,7 +700,11 @@ def localize_audio(
     logger.info("STT completed in %d ms (%d segments)", stt_elapsed_ms, len(stt_analysis.segments))
 
     # ── Speaker diarization ──
-    diarized_segments = assign_speakers_to_transcribed(audio, stt_analysis.segments)
+    diarized_segments = (
+        stt_analysis.segments
+        if any(segment.speaker_id is not None for segment in stt_analysis.segments)
+        else assign_speakers_to_transcribed(audio, stt_analysis.segments)
+    )
     speaker_groups = _group_segments_by_speaker(diarized_segments)
     n_speakers = len(speaker_groups)
     if n_speakers > 1:
@@ -529,10 +743,13 @@ def localize_audio(
     }
 
     if not stt_analysis.transcript:
+        tts_skip_reason = "No transcript text was produced."
+        if localized_audio is not None:
+            tts_skip_reason = str(localized_audio.tts_meta.get("reason", tts_skip_reason))
         payload["stages"] = {
             **payload["stages"],
             "translation": {"status": "skipped", "reason": "No transcript text was produced."},
-            "tts": {"status": "skipped", "reason": "No translated text was produced."},
+            "tts": {"status": "skipped", "reason": tts_skip_reason},
         }
         return payload
 
@@ -579,10 +796,42 @@ def localize_audio(
     }
 
     if not translated_text:
+        tts_skip_reason = "Translation returned empty text."
+        if localized_audio is not None:
+            tts_skip_reason = str(localized_audio.tts_meta.get("reason", tts_skip_reason))
         payload["stages"] = {
             **payload["stages"],
-            "tts": {"status": "skipped", "reason": "Translation returned empty text."},
+            "tts": {"status": "skipped", "reason": tts_skip_reason},
         }
+        return payload
+
+    if localized_audio is not None:
+        total_elapsed_ms = round((time.monotonic() - t0_pipeline) * 1000)
+        tts_stage = {
+            "status": str(localized_audio.tts_meta.get("status", "ok")),
+            "elapsed_ms": localized_audio.tts_elapsed_ms,
+            "language": validate_tts_language(normalized_target_language),
+            **{
+                key: value
+                for key, value in localized_audio.tts_meta.items()
+                if key not in {"status", "sample_rate", "duration_ms", "content_type", "audio_base64"}
+            },
+        }
+        synthesized = localized_audio.synthesized_audio
+        if synthesized is not None:
+            tts_stage.update(
+                {
+                    "sample_rate": synthesized.sample_rate,
+                    "duration_ms": synthesized.duration_ms,
+                    "content_type": "audio/wav",
+                    "audio_base64": encode_wav_preview(synthesized),
+                }
+            )
+        elif "reason" not in tts_stage:
+            tts_stage["reason"] = "Triton localize pipeline returned no synthesized audio."
+
+        payload["stages"] = {**payload["stages"], "tts": tts_stage}
+        payload["elapsed_ms"] = total_elapsed_ms
         return payload
 
     # ── TTS stage (per-segment, time-aligned) ──

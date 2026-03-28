@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pipeline.audio import UnsupportedAudioError, decode_wav, resample_audio
 from pipeline.localization import (
     LocalizationStageError,
+    TritonLocalizePipelineClient,
     TritonLocalizeTextPipelineClient,
     localize_audio,
 )
@@ -37,7 +38,7 @@ from pipeline.triton import (
     inspect_model_repository,
 )
 from pipeline.tts import TritonTtsClient, encode_wav_preview, validate_tts_language
-from pipeline.tts_contract import DEFAULT_TTS_MODEL_ID
+from pipeline.tts_contract import DEFAULT_TTS_MODEL_ID, DEFAULT_TTS_REPOSITORY_MODEL_NAME
 from pipeline.vad import analyze_vad
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,19 @@ def _cached_localize_text_client(url: str):
         readiness = client.readiness()
         if readiness.ready:
             logger.info("Using Triton localize text pipeline client (STT + translation in one gRPC call)")
+            return client
+    except TritonUnavailableError:
+        pass
+    return None
+
+
+@functools.lru_cache(maxsize=4)
+def _cached_localize_pipeline_client(url: str):
+    try:
+        client = TritonLocalizePipelineClient(url=url)
+        readiness = client.readiness()
+        if readiness.ready:
+            logger.info("Using Triton localize pipeline client (STT + translation + TTS in one gRPC call)")
             return client
     except TritonUnavailableError:
         pass
@@ -347,11 +361,19 @@ async def localize(
     audio = resample_audio(decode_wav(blob), target_sample_rate=16000)
 
     def _work():
+        localize_pipeline_client = None
         localize_text_client = None
-        if (
+        can_use_localize_text_pipeline = (
             stt_spec.repository_model_name == DEFAULT_WHISPER_REPOSITORY_MODEL_NAME
             and translation_spec.repository_model_name == DEFAULT_TRANSLATION_REPOSITORY_MODEL_NAME
-        ):
+        )
+        can_use_localize_pipeline = (
+            can_use_localize_text_pipeline and tts_spec.repository_model_name == DEFAULT_TTS_REPOSITORY_MODEL_NAME
+        )
+
+        if can_use_localize_pipeline:
+            localize_pipeline_client = _cached_localize_pipeline_client(_triton_grpc_url())
+        if can_use_localize_text_pipeline and localize_pipeline_client is None:
             localize_text_client = _cached_localize_text_client(_triton_grpc_url())
 
         return localize_audio(
@@ -364,6 +386,7 @@ async def localize(
             stt_model=stt_model,
             translation_model=translation_model,
             tts_model=tts_model,
+            localize_pipeline_client=localize_pipeline_client,
             localize_text_client=localize_text_client,
             vad_client=_cached_vad_client(_triton_grpc_url()),
             stt_client=_cached_stt_client(_triton_grpc_url(), stt_spec.repository_model_name),

@@ -214,6 +214,26 @@ class PrepareModelsTest(unittest.TestCase):
             self.assertIn('name: "localize_text_pipeline"', pipeline_config.read_text(encoding="utf-8"))
             self.assertIn("translation_elapsed_ms", pipeline_model.read_text(encoding="utf-8"))
 
+    def test_materialize_localize_pipeline_when_localize_text_and_tts_are_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = Path(temp_dir)
+            localize_text_root = output_root / "localize_text_pipeline" / "1"
+            tts_root = output_root / "qwen3_tts_0_6b" / "1"
+            localize_text_root.mkdir(parents=True)
+            tts_root.mkdir(parents=True)
+            (localize_text_root / "model.py").write_text("# localize text pipeline\n", encoding="utf-8")
+            (tts_root / "model.py").write_text("# tts backend\n", encoding="utf-8")
+
+            prepare_models_module._materialize_localize_pipeline(output_root)
+
+            pipeline_config = output_root / "localize_pipeline" / "config.pbtxt"
+            pipeline_model = output_root / "localize_pipeline" / "1" / "model.py"
+            self.assertTrue(pipeline_config.exists())
+            self.assertTrue(pipeline_model.exists())
+            self.assertIn('name: "localize_pipeline"', pipeline_config.read_text(encoding="utf-8"))
+            self.assertIn('name: "speaker_prompt"', pipeline_config.read_text(encoding="utf-8"))
+            self.assertIn("tts_meta_json", pipeline_model.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

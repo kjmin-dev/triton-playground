@@ -9,7 +9,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline.audio import AudioBuffer
-from pipeline.localization import LocalizationStageError, LocalizedTextAnalysis, localize_audio
+from pipeline.localization import (
+    LocalizationStageError,
+    LocalizedAudioAnalysis,
+    LocalizedTextAnalysis,
+    localize_audio,
+)
 from pipeline.stt import TranscribedSegment
 from pipeline.tts import SynthesizedAudio
 
@@ -232,6 +237,104 @@ class LocalizationPipelineTest(unittest.TestCase):
         self.assertEqual(payload["stages"]["stt"]["elapsed_ms"], 12)
         self.assertEqual(payload["stages"]["translation"]["elapsed_ms"], 7)
         self.assertEqual(pipeline_client.call, (0.5, "en", "ko"))
+
+    def test_localize_audio_prefers_triton_localize_pipeline_when_available(self) -> None:
+        audio = AudioBuffer(samples=np.ones(512 * 16, dtype=np.float32), sample_rate=16000)
+
+        class FakeLocalizePipelineClient:
+            def localize(self, **kwargs) -> LocalizedAudioAnalysis:
+                self.call = (
+                    kwargs["threshold"],
+                    kwargs["source_language"],
+                    kwargs["target_language"],
+                    kwargs["speaker_prompt"],
+                )
+                return LocalizedAudioAnalysis(
+                    transcript="hello world",
+                    translated_text="annyeong haseyo",
+                    segments=[
+                        TranscribedSegment(
+                            start_ms=0,
+                            end_ms=audio.duration_ms,
+                            duration_ms=audio.duration_ms,
+                            average_probability=0.9,
+                            peak_probability=0.9,
+                            text="hello world",
+                            speaker_id="speaker_0",
+                        )
+                    ],
+                    stt_elapsed_ms=11,
+                    translation_elapsed_ms=6,
+                    tts_elapsed_ms=9,
+                    synthesized_audio=SynthesizedAudio(
+                        sample_rate=24000,
+                        samples=np.linspace(-0.1, 0.1, num=960, dtype=np.float32),
+                    ),
+                    tts_meta={
+                        "status": "ok",
+                        "voice_cloning": True,
+                        "voice_cloning_mode": "icl",
+                        "speaker_count": 1,
+                        "segments_synthesized": 1,
+                        "time_aligned": True,
+                        "speakers": ["speaker_0"],
+                    },
+                )
+
+        class FakeLocalizeTextClient:
+            def localize_text(self, **kwargs) -> LocalizedTextAnalysis:  # pragma: no cover - should not be called
+                _ = kwargs
+                raise AssertionError("localize_text pipeline should be skipped when full localize pipeline is ready")
+
+        class FakeVadClient:
+            def score_windows(self, windows: np.ndarray) -> list[float]:  # pragma: no cover - should not be called
+                _ = windows
+                raise AssertionError("worker-side VAD should be skipped when full localize pipeline is available")
+
+        class FakeSttClient:
+            def transcribe(self, *args, **kwargs) -> str:  # pragma: no cover - should not be called
+                _ = (args, kwargs)
+                raise AssertionError("worker-side STT should be skipped when full localize pipeline is available")
+
+        class FakeTranslationClient:
+            def translate(self, *args, **kwargs) -> str:  # pragma: no cover - should not be called
+                _ = (args, kwargs)
+                raise AssertionError(
+                    "worker-side translation should be skipped when full localize pipeline is available"
+                )
+
+        class FakeTtsClient:
+            def synthesize_many(self, requests) -> list[SynthesizedAudio]:  # pragma: no cover - should not be called
+                _ = requests
+                raise AssertionError("worker-side TTS should be skipped when full localize pipeline is available")
+
+        pipeline_client = FakeLocalizePipelineClient()
+        payload = localize_audio(
+            audio=audio,
+            threshold=0.5,
+            source_language="en",
+            target_language="ko",
+            prompt=None,
+            speaker_prompt="warm",
+            stt_model="whisper_large_v3_turbo",
+            translation_model="madlad400_3b_mt",
+            tts_model="qwen3_tts_0_6b",
+            localize_pipeline_client=pipeline_client,
+            localize_text_client=FakeLocalizeTextClient(),
+            vad_client=FakeVadClient(),
+            stt_client=FakeSttClient(),
+            translation_client=FakeTranslationClient(),
+            tts_client=FakeTtsClient(),
+        )
+
+        self.assertEqual(payload["transcript"], "hello world")
+        self.assertEqual(payload["translated_text"], "annyeong haseyo")
+        self.assertEqual(payload["stages"]["stt"]["elapsed_ms"], 11)
+        self.assertEqual(payload["stages"]["translation"]["elapsed_ms"], 6)
+        self.assertEqual(payload["stages"]["tts"]["elapsed_ms"], 9)
+        self.assertEqual(payload["stages"]["tts"]["speaker_count"], 1)
+        self.assertTrue(payload["stages"]["tts"]["audio_base64"])
+        self.assertEqual(pipeline_client.call, (0.5, "en", "ko", "warm"))
 
 
 if __name__ == "__main__":
