@@ -57,10 +57,10 @@ class TritonPythonModel:
             raise pb_utils.TritonModelException(f"missing Whisper upstream assets at {model_dir}")
 
         self._processor = AutoProcessor.from_pretrained(model_dir)
-        torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_dir,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
             low_cpu_mem_usage=True,
         )
         if torch.cuda.is_available():
@@ -72,7 +72,7 @@ class TritonPythonModel:
             tokenizer=self._processor.tokenizer,
             feature_extractor=self._processor.feature_extractor,
             device=0 if torch.cuda.is_available() else -1,
-            torch_dtype=torch_dtype,
+            torch_dtype=dtype,
         )
 
     def execute(self, requests):

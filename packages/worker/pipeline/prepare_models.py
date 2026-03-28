@@ -327,9 +327,34 @@ def prepare_model_repository(
         record.update(install_record)
         manifest["models"].append(record)
 
+    _write_vad_cpu_config(output_root)
     _materialize_vad_streaming(output_root)
 
     return manifest
+
+
+def _write_vad_cpu_config(output_root: Path) -> None:
+    """Write a config.pbtxt for silero_vad that forces CPU execution.
+
+    Without this, Triton auto-infers the ONNX model config and assigns it to
+    GPU, causing unnecessary Memcpy warnings for this tiny CPU-bound model.
+    """
+    vad_dir = output_root / "silero_vad"
+    if not (vad_dir / "1" / "model.onnx").is_file():
+        return
+
+    config = dedent("""\
+        name: "silero_vad"
+        backend: "onnxruntime"
+        max_batch_size: 0
+        instance_group [
+          {
+            kind: KIND_CPU
+            count: 1
+          }
+        ]
+    """)
+    (vad_dir / "config.pbtxt").write_text(config, encoding="utf-8")
 
 
 def _materialize_vad_streaming(output_root: Path) -> None:
