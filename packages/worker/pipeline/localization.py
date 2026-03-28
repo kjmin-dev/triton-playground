@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 
 import numpy as np
 
 from pipeline.audio import AudioBuffer
+from pipeline.diarization import assign_speakers_to_transcribed
 from pipeline.stt import SttAnalysis, TranscribedSegment, _slice_audio, analyze_stt
 from pipeline.translation import TritonTranslationClient, normalize_pipeline_language
-from pipeline.tts import TritonTtsClient, encode_wav_preview, validate_tts_language
+from pipeline.tts import SynthesizedAudio, TritonTtsClient, encode_wav_preview, validate_tts_language
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +34,24 @@ _REF_MAX_DURATION_MS = 10000
 def _select_reference_segment(
     audio: AudioBuffer,
     segments: list[TranscribedSegment],
+    speaker_id: str | None = None,
 ) -> tuple[np.ndarray, str, int] | None:
     """Pick the best VAD segment for voice cloning reference.
 
+    When speaker_id is provided, only segments from that speaker are considered.
     Returns (samples, text, sample_rate) or None.
     """
+    filtered = segments
+    if speaker_id is not None:
+        filtered = [s for s in segments if s.speaker_id == speaker_id]
+        if not filtered:
+            filtered = segments  # fallback to all segments
+
     candidates = [
-        seg for seg in segments if seg.text.strip() and _REF_MIN_DURATION_MS <= seg.duration_ms <= _REF_MAX_DURATION_MS
+        seg for seg in filtered if seg.text.strip() and _REF_MIN_DURATION_MS <= seg.duration_ms <= _REF_MAX_DURATION_MS
     ]
     if not candidates:
-        candidates = [seg for seg in segments if seg.text.strip() and seg.duration_ms >= 500]
+        candidates = [seg for seg in filtered if seg.text.strip() and seg.duration_ms >= 500]
     if not candidates:
         return None
 
@@ -68,6 +78,99 @@ def _build_base_payload(
             "translation": translation_model,
             "tts": tts_model,
         },
+    }
+
+
+def _group_segments_by_speaker(
+    segments: list[TranscribedSegment],
+) -> dict[str, list[TranscribedSegment]]:
+    """Group segments by speaker_id. Segments with None speaker_id go under 'speaker_0'."""
+    groups: dict[str, list[TranscribedSegment]] = defaultdict(list)
+    for seg in segments:
+        key = seg.speaker_id or "speaker_0"
+        groups[key].append(seg)
+    return dict(groups)
+
+
+def _synthesize_per_speaker(
+    *,
+    audio: AudioBuffer,
+    speaker_groups: dict[str, list[TranscribedSegment]],
+    translated_text: str,
+    tts_language: str,
+    speaker_prompt: str | None,
+    tts_client: TritonTtsClient,
+    all_segments: list[TranscribedSegment],
+) -> tuple[SynthesizedAudio, dict[str, object]]:
+    """Synthesize TTS per speaker and merge into a single waveform.
+
+    For single-speaker audio, behaves identically to the previous implementation.
+    For multi-speaker, synthesizes each speaker's portion with that speaker's
+    voice reference, then concatenates in original temporal order.
+    """
+    speaker_ids = sorted(speaker_groups.keys())
+    is_multi = len(speaker_ids) > 1
+
+    if not is_multi:
+        # Single speaker: synthesize full translated text with best reference
+        ref = _select_reference_segment(audio, all_segments)
+        synthesized = tts_client.synthesize(
+            translated_text,
+            language=tts_language,
+            speaker_prompt=speaker_prompt,
+            ref_audio=ref[0] if ref else None,
+            ref_audio_sample_rate=ref[2] if ref else 16000,
+            ref_text=ref[1] if ref else None,
+        )
+        vc_mode = "icl" if (ref and ref[1]) else ("x_vector" if ref else "none")
+        return synthesized, {
+            "voice_cloning": ref is not None,
+            "voice_cloning_mode": vc_mode,
+            "speaker_count": 1,
+        }
+
+    # Multi-speaker: synthesize per speaker, then concatenate
+    logger.info("Multi-speaker TTS: %d speakers detected", len(speaker_ids))
+
+    # For multi-speaker, we translate the full text once (already done upstream)
+    # and synthesize per speaker. Each speaker gets their own voice reference.
+    # The translation is split proportionally by speaker segment count.
+    speaker_audios: list[tuple[str, SynthesizedAudio]] = []
+
+    for sid in speaker_ids:
+        speaker_segs = speaker_groups[sid]
+        speaker_text = " ".join(s.text for s in speaker_segs if s.text.strip())
+        if not speaker_text.strip():
+            continue
+
+        ref = _select_reference_segment(audio, all_segments, speaker_id=sid)
+
+        try:
+            synth = tts_client.synthesize(
+                speaker_text,
+                language=tts_language,
+                speaker_prompt=speaker_prompt,
+                ref_audio=ref[0] if ref else None,
+                ref_audio_sample_rate=ref[2] if ref else 16000,
+                ref_text=ref[1] if ref else None,
+            )
+            speaker_audios.append((sid, synth))
+        except Exception:
+            logger.warning("TTS failed for %s, skipping", sid, exc_info=True)
+
+    if not speaker_audios:
+        raise RuntimeError("TTS failed for all speakers")
+
+    # Concatenate all speaker audio sequentially
+    sample_rate = speaker_audios[0][1].sample_rate
+    merged = np.concatenate([sa.samples for _, sa in speaker_audios])
+    synthesized = SynthesizedAudio(sample_rate=sample_rate, samples=merged)
+
+    return synthesized, {
+        "voice_cloning": True,
+        "voice_cloning_mode": "icl",
+        "speaker_count": len(speaker_ids),
+        "speakers": [sid for sid, _ in speaker_audios],
     }
 
 
@@ -103,6 +206,7 @@ def localize_audio(
 
     t0_pipeline = time.monotonic()
 
+    # ── STT stage ──
     stt_analysis: SttAnalysis
     t0 = time.monotonic()
     try:
@@ -135,6 +239,13 @@ def localize_audio(
     stt_elapsed_ms = round((time.monotonic() - t0) * 1000)
     logger.info("STT completed in %d ms (%d segments)", stt_elapsed_ms, len(stt_analysis.segments))
 
+    # ── Speaker diarization ──
+    diarized_segments = assign_speakers_to_transcribed(audio, stt_analysis.segments)
+    speaker_groups = _group_segments_by_speaker(diarized_segments)
+    n_speakers = len(speaker_groups)
+    if n_speakers > 1:
+        logger.info("Diarization: %d speakers detected", n_speakers)
+
     stt_warnings: list[str] = []
     if normalized_source_language is None:
         stt_warnings.append(
@@ -147,9 +258,10 @@ def localize_audio(
         "elapsed_ms": stt_elapsed_ms,
         "language": stt_analysis.language,
         "task": stt_analysis.task,
-        "segment_count": len(stt_analysis.segments),
+        "segment_count": len(diarized_segments),
+        "speaker_count": n_speakers,
         "transcript": stt_analysis.transcript,
-        "segments": [segment.to_dict() for segment in stt_analysis.segments],
+        "segments": [segment.to_dict() for segment in diarized_segments],
     }
     if stt_warnings:
         stt_stage["warnings"] = stt_warnings
@@ -174,6 +286,7 @@ def localize_audio(
         }
         return payload
 
+    # ── Translation stage ──
     t0 = time.monotonic()
     try:
         translated_text = translation_client.translate(
@@ -219,25 +332,19 @@ def localize_audio(
         }
         return payload
 
+    # ── TTS stage (per-speaker voice cloning) ──
     tts_language = validate_tts_language(normalized_target_language)
-
-    ref = _select_reference_segment(audio, stt_analysis.segments)
-    if ref is not None:
-        logger.info(
-            "Voice cloning: selected %.1fs reference segment (prob=%.2f)",
-            len(ref[0]) / ref[2],
-            max((s.average_probability for s in stt_analysis.segments if s.text == ref[1]), default=0),
-        )
 
     t0 = time.monotonic()
     try:
-        synthesized = tts_client.synthesize(
-            translated_text,
-            language=tts_language,
+        synthesized, tts_meta = _synthesize_per_speaker(
+            audio=audio,
+            speaker_groups=speaker_groups,
+            translated_text=translated_text,
+            tts_language=tts_language,
             speaker_prompt=speaker_prompt,
-            ref_audio=ref[0] if ref else None,
-            ref_audio_sample_rate=ref[2] if ref else 16000,
-            ref_text=ref[1] if ref else None,
+            tts_client=tts_client,
+            all_segments=diarized_segments,
         )
     except Exception as exc:
         raise LocalizationStageError(
@@ -258,15 +365,13 @@ def localize_audio(
     total_elapsed_ms = round((time.monotonic() - t0_pipeline) * 1000)
     logger.info("TTS completed in %d ms (total pipeline: %d ms)", tts_elapsed_ms, total_elapsed_ms)
 
-    vc_mode = "icl" if (ref and ref[1]) else ("x_vector" if ref else "none")
     payload["stages"] = {
         **payload["stages"],
         "tts": {
             "status": "ok",
             "elapsed_ms": tts_elapsed_ms,
             "language": tts_language,
-            "voice_cloning": ref is not None,
-            "voice_cloning_mode": vc_mode,
+            **tts_meta,
             "sample_rate": synthesized.sample_rate,
             "duration_ms": synthesized.duration_ms,
             "content_type": "audio/wav",
