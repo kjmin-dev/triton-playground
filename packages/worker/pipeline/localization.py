@@ -36,16 +36,12 @@ def _select_reference_segment(
     segments: list[TranscribedSegment],
     speaker_id: str | None = None,
 ) -> tuple[np.ndarray, str, int] | None:
-    """Pick the best VAD segment for voice cloning reference.
-
-    When speaker_id is provided, only segments from that speaker are considered.
-    Returns (samples, text, sample_rate) or None.
-    """
+    """Pick the best VAD segment for voice cloning reference."""
     filtered = segments
     if speaker_id is not None:
         filtered = [s for s in segments if s.speaker_id == speaker_id]
         if not filtered:
-            filtered = segments  # fallback to all segments
+            filtered = segments
 
     candidates = [
         seg for seg in filtered if seg.text.strip() and _REF_MIN_DURATION_MS <= seg.duration_ms <= _REF_MAX_DURATION_MS
@@ -84,93 +80,103 @@ def _build_base_payload(
 def _group_segments_by_speaker(
     segments: list[TranscribedSegment],
 ) -> dict[str, list[TranscribedSegment]]:
-    """Group segments by speaker_id. Segments with None speaker_id go under 'speaker_0'."""
     groups: dict[str, list[TranscribedSegment]] = defaultdict(list)
     for seg in segments:
-        key = seg.speaker_id or "speaker_0"
-        groups[key].append(seg)
+        groups[seg.speaker_id or "speaker_0"].append(seg)
     return dict(groups)
 
 
-def _synthesize_per_speaker(
+def _time_stretch(samples: np.ndarray, target_length: int) -> np.ndarray:
+    """Resample audio to exactly target_length samples via linear interpolation."""
+    if len(samples) == 0 or target_length <= 0:
+        return np.zeros(target_length, dtype=np.float32)
+    if len(samples) == target_length:
+        return samples
+    src_pos = np.linspace(0.0, 1.0, num=len(samples), endpoint=False)
+    tgt_pos = np.linspace(0.0, 1.0, num=target_length, endpoint=False)
+    return np.interp(tgt_pos, src_pos, samples).astype(np.float32)
+
+
+def _synthesize_time_aligned(
     *,
     audio: AudioBuffer,
+    diarized_segments: list[TranscribedSegment],
     speaker_groups: dict[str, list[TranscribedSegment]],
     translated_text: str,
     tts_language: str,
     speaker_prompt: str | None,
     tts_client: TritonTtsClient,
-    all_segments: list[TranscribedSegment],
 ) -> tuple[SynthesizedAudio, dict[str, object]]:
-    """Synthesize TTS per speaker and merge into a single waveform.
+    """Synthesize TTS per segment, time-stretched to match original timing.
 
-    For single-speaker audio, behaves identically to the previous implementation.
-    For multi-speaker, synthesizes each speaker's portion with that speaker's
-    voice reference, then concatenates in original temporal order.
+    Builds a waveform that mirrors the original audio duration: each segment's
+    TTS output is stretched/compressed to fit the original segment's time slot,
+    with silence filling the gaps between segments.
     """
-    speaker_ids = sorted(speaker_groups.keys())
-    is_multi = len(speaker_ids) > 1
+    total_samples = int(audio.duration_ms * audio.sample_rate / 1000)
+    output = np.zeros(total_samples, dtype=np.float32)
+    sample_rate: int | None = None
 
-    if not is_multi:
-        # Single speaker: synthesize full translated text with best reference
-        ref = _select_reference_segment(audio, all_segments)
-        synthesized = tts_client.synthesize(
-            translated_text,
-            language=tts_language,
-            speaker_prompt=speaker_prompt,
-            ref_audio=ref[0] if ref else None,
-            ref_audio_sample_rate=ref[2] if ref else 16000,
-            ref_text=ref[1] if ref else None,
-        )
-        vc_mode = "icl" if (ref and ref[1]) else ("x_vector" if ref else "none")
-        return synthesized, {
-            "voice_cloning": ref is not None,
-            "voice_cloning_mode": vc_mode,
-            "speaker_count": 1,
-        }
+    # Build per-speaker reference cache
+    speaker_refs: dict[str, tuple[np.ndarray, str, int] | None] = {}
+    for sid in speaker_groups:
+        speaker_refs[sid] = _select_reference_segment(audio, diarized_segments, speaker_id=sid)
 
-    # Multi-speaker: synthesize per speaker, then concatenate
-    logger.info("Multi-speaker TTS: %d speakers detected", len(speaker_ids))
-
-    # For multi-speaker, we translate the full text once (already done upstream)
-    # and synthesize per speaker. Each speaker gets their own voice reference.
-    # The translation is split proportionally by speaker segment count.
-    speaker_audios: list[tuple[str, SynthesizedAudio]] = []
-
-    for sid in speaker_ids:
-        speaker_segs = speaker_groups[sid]
-        speaker_text = " ".join(s.text for s in speaker_segs if s.text.strip())
-        if not speaker_text.strip():
+    segments_synthesized = 0
+    for seg in diarized_segments:
+        if not seg.text.strip():
             continue
 
-        ref = _select_reference_segment(audio, all_segments, speaker_id=sid)
+        sid = seg.speaker_id or "speaker_0"
+        ref = speaker_refs.get(sid)
 
         try:
             synth = tts_client.synthesize(
-                speaker_text,
+                seg.text,
                 language=tts_language,
                 speaker_prompt=speaker_prompt,
                 ref_audio=ref[0] if ref else None,
                 ref_audio_sample_rate=ref[2] if ref else 16000,
                 ref_text=ref[1] if ref else None,
             )
-            speaker_audios.append((sid, synth))
         except Exception:
-            logger.warning("TTS failed for %s, skipping", sid, exc_info=True)
+            logger.warning("TTS failed for segment %d-%d ms, filling silence", seg.start_ms, seg.end_ms, exc_info=True)
+            continue
 
-    if not speaker_audios:
-        raise RuntimeError("TTS failed for all speakers")
+        if sample_rate is None:
+            sample_rate = synth.sample_rate
 
-    # Concatenate all speaker audio sequentially
-    sample_rate = speaker_audios[0][1].sample_rate
-    merged = np.concatenate([sa.samples for _, sa in speaker_audios])
-    synthesized = SynthesizedAudio(sample_rate=sample_rate, samples=merged)
+        # Time-stretch TTS output to fit the original segment duration
+        target_samples = int(seg.duration_ms * (sample_rate or 24000) / 1000)
+        stretched = _time_stretch(synth.samples, target_samples)
 
-    return synthesized, {
+        # Place into output at the segment's original position
+        start_sample = int(seg.start_ms * (sample_rate or 24000) / 1000)
+        end_sample = min(start_sample + len(stretched), len(output))
+        fit_len = end_sample - start_sample
+        if fit_len > 0:
+            output[start_sample:end_sample] = stretched[:fit_len]
+        segments_synthesized += 1
+
+    if sample_rate is None:
+        sample_rate = 24000
+
+    # Trim trailing silence
+    last_seg = max(diarized_segments, key=lambda s: s.end_ms) if diarized_segments else None
+    if last_seg:
+        trim_sample = min(len(output), int((last_seg.end_ms + 500) * sample_rate / 1000))
+        output = output[:trim_sample]
+
+    n_speakers = len(speaker_groups)
+    vc_mode = "icl" if any(r and r[1] for r in speaker_refs.values()) else "x_vector"
+
+    return SynthesizedAudio(sample_rate=sample_rate, samples=output), {
         "voice_cloning": True,
-        "voice_cloning_mode": "icl",
-        "speaker_count": len(speaker_ids),
-        "speakers": [sid for sid, _ in speaker_audios],
+        "voice_cloning_mode": vc_mode,
+        "speaker_count": n_speakers,
+        "segments_synthesized": segments_synthesized,
+        "time_aligned": True,
+        "speakers": sorted(speaker_groups.keys()),
     }
 
 
@@ -332,19 +338,19 @@ def localize_audio(
         }
         return payload
 
-    # ── TTS stage (per-speaker voice cloning) ──
+    # ── TTS stage (per-segment, time-aligned) ──
     tts_language = validate_tts_language(normalized_target_language)
 
     t0 = time.monotonic()
     try:
-        synthesized, tts_meta = _synthesize_per_speaker(
+        synthesized, tts_meta = _synthesize_time_aligned(
             audio=audio,
+            diarized_segments=diarized_segments,
             speaker_groups=speaker_groups,
             translated_text=translated_text,
             tts_language=tts_language,
             speaker_prompt=speaker_prompt,
             tts_client=tts_client,
-            all_segments=diarized_segments,
         )
     except Exception as exc:
         raise LocalizationStageError(

@@ -10,14 +10,15 @@ from typing import TypeVar
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from pipeline.audio import UnsupportedAudioError, decode_wav, resample_audio
 from pipeline.localization import LocalizationStageError, localize_audio
 from pipeline.model_catalog import get_model_spec, get_profile_model_ids, list_model_specs
 from pipeline.runtime_status import TritonReadiness, build_ready_payload
-from pipeline.stt import TritonWhisperClient, analyze_stt
+from pipeline.stt import TranscribedSegment, TritonWhisperClient, analyze_stt
 from pipeline.stt_contract import DEFAULT_WHISPER_MODEL_ID
+from pipeline.subtitles import segments_to_csv, segments_to_srt, segments_to_vtt
 from pipeline.translation import TritonTranslationClient
 from pipeline.translation_contract import DEFAULT_TRANSLATION_MODEL_ID
 from pipeline.triton import (
@@ -404,3 +405,57 @@ async def vad(
         "segments": [segment.to_dict() for segment in analysis.segments],
         "window_scores": analysis.window_scores,
     }
+
+
+def _parse_segments_from_json(data: dict) -> list[TranscribedSegment]:
+    """Extract TranscribedSegment list from a localize/stt response payload."""
+    raw_segments = []
+    if "stages" in data and "stt" in data["stages"]:
+        raw_segments = data["stages"]["stt"].get("segments", [])
+    elif "segments" in data:
+        raw_segments = data["segments"]
+
+    return [
+        TranscribedSegment(
+            start_ms=s["start_ms"],
+            end_ms=s["end_ms"],
+            duration_ms=s["duration_ms"],
+            average_probability=s.get("average_probability", 0),
+            peak_probability=s.get("peak_probability", 0),
+            text=s.get("text", ""),
+            speaker_id=s.get("speaker_id"),
+        )
+        for s in raw_segments
+    ]
+
+
+@app.post("/api/subtitles/{fmt}")
+async def subtitles(
+    fmt: str,
+    request: Request,
+):
+    """Generate subtitles from a JSON payload containing segments.
+
+    POST the localize or STT response body as JSON. Supported formats: srt, vtt, csv.
+    """
+    if fmt not in ("srt", "vtt", "csv"):
+        raise HTTPException(status_code=400, detail=f"Unsupported format: {fmt}. Use srt, vtt, or csv.")
+
+    body = await request.json()
+    segments = _parse_segments_from_json(body)
+    if not segments:
+        raise HTTPException(status_code=400, detail="No segments found in request body.")
+
+    generators = {"srt": segments_to_srt, "vtt": segments_to_vtt, "csv": segments_to_csv}
+    content_types = {
+        "srt": "text/plain; charset=utf-8",
+        "vtt": "text/vtt; charset=utf-8",
+        "csv": "text/csv; charset=utf-8",
+    }
+
+    text = generators[fmt](segments)
+    return PlainTextResponse(
+        content=text,
+        media_type=content_types[fmt],
+        headers={"Content-Disposition": f'attachment; filename="subtitles.{fmt}"'},
+    )
