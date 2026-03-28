@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router';
 import type { LucideIcon } from 'lucide-react';
-import { ArrowRight, Globe2, Languages, LoaderCircle, MicVocal, Sparkles, Upload, Waves } from 'lucide-react';
+import { ArrowRight, Download, Globe2, Languages, LoaderCircle, MicVocal, Sparkles, Upload, Waves } from 'lucide-react';
 import * as React from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -194,6 +194,26 @@ function fmtProb(p: number) {
 
 function langLabel(code: string) {
   return STT_LANGUAGE_OPTIONS.find((o) => o.value === code)?.label ?? code;
+}
+
+async function downloadSubtitle(fmt: string, loc: LocalizeResponse, workerBaseUrl: string) {
+  try {
+    const res = await fetch(`${workerBaseUrl}/api/subtitles/${fmt}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(loc),
+    });
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `subtitles.${fmt}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch {
+    // silent fail
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -795,6 +815,26 @@ function Home() {
                     </div>
                   </div>
                 </div>
+
+                {/* Subtitle download */}
+                {loc.stages.stt.segments && loc.stages.stt.segments.length > 0 && (
+                  <div>
+                    <h3 className='mb-2 text-sm font-medium text-slate-900'>Download Subtitles</h3>
+                    <div className='flex gap-2'>
+                      {(['srt', 'vtt', 'csv'] as const).map((fmt) => (
+                        <button
+                          key={fmt}
+                          className='flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50'
+                          onClick={() => downloadSubtitle(fmt, loc, workerBaseUrl)}
+                          type='button'
+                        >
+                          <Download className='h-3.5 w-3.5' />
+                          {fmt.toUpperCase()}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <EmptyState>Run Voice Dub for end-to-end speech translation with voice cloning.</EmptyState>
