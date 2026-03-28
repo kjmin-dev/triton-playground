@@ -349,6 +349,8 @@ class TritonVadStreamingClient:
         if not readiness.ready:
             raise TritonUnavailableError(readiness.summary)
 
+        import numpy as np
+
         windows_data = windows.astype(np.float32)
         if windows_data.ndim == 1:
             windows_data = windows_data.reshape(-1, 512)
