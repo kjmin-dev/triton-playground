@@ -15,15 +15,19 @@ class SpeechSegment:
     duration_ms: int
     average_probability: float
     peak_probability: float
+    speaker_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "start_ms": self.start_ms,
             "end_ms": self.end_ms,
             "duration_ms": self.duration_ms,
             "average_probability": round(self.average_probability, 4),
             "peak_probability": round(self.peak_probability, 4),
         }
+        if self.speaker_id is not None:
+            result["speaker_id"] = self.speaker_id
+        return result
 
 
 @dataclass(frozen=True)

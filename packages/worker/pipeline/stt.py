@@ -29,9 +29,10 @@ class TranscribedSegment:
     average_probability: float
     peak_probability: float
     text: str
+    speaker_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "start_ms": self.start_ms,
             "end_ms": self.end_ms,
             "duration_ms": self.duration_ms,
@@ -39,6 +40,9 @@ class TranscribedSegment:
             "peak_probability": round(self.peak_probability, 4),
             "text": self.text,
         }
+        if self.speaker_id is not None:
+            result["speaker_id"] = self.speaker_id
+        return result
 
 
 @dataclass(frozen=True)
