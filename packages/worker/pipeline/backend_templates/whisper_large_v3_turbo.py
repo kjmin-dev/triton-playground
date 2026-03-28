@@ -112,7 +112,9 @@ class TritonPythonModel:
         self._pipeline_batch_size = 8
 
     def execute(self, requests):
-        responses = []
+        request_transcripts: list[list[str]] = []
+        grouped_entries: dict[tuple[str, str, str], list[tuple[int, int, np.ndarray, int]]] = defaultdict(list)
+
         for request in requests:
             audio_batch = _tensor_as_audio_batch(request, "audio_pcm", "audio_lengths")
             segment_count = len(audio_batch)
@@ -121,28 +123,34 @@ class TritonPythonModel:
             languages = _tensor_as_bytes_list(request, "language", segment_count)
             prompts = _tensor_as_bytes_list(request, "prompt", segment_count)
 
-            transcripts = [""] * segment_count
-            grouped_indexes: dict[tuple[str, str, str], list[int]] = defaultdict(list)
-            for index, key in enumerate(zip(tasks, languages, prompts, strict=True)):
-                grouped_indexes[key].append(index)
+            request_index = len(request_transcripts)
+            request_transcripts.append([""] * segment_count)
+            for segment_index, (task, language, prompt, sample_rate, audio_segment) in enumerate(
+                zip(tasks, languages, prompts, sample_rates, audio_batch, strict=True)
+            ):
+                grouped_entries[(task, language, prompt)].append(
+                    (request_index, segment_index, audio_segment, sample_rate)
+                )
 
-            for (task, language, prompt), indexes in grouped_indexes.items():
-                generate_kwargs: dict[str, object] = {"task": task or "transcribe"}
-                normalized_language = language or None
-                normalized_prompt = prompt or None
-                if normalized_language is not None:
-                    generate_kwargs["language"] = normalized_language
-                if normalized_prompt is not None and hasattr(self._processor, "get_prompt_ids"):
-                    prompt_ids = self._processor.get_prompt_ids(
-                        normalized_prompt,
-                        language=normalized_language,
-                        task=task or "transcribe",
-                    )
-                    if prompt_ids is not None:
-                        generate_kwargs["prompt_ids"] = prompt_ids
+        for (task, language, prompt), entries in grouped_entries.items():
+            generate_kwargs: dict[str, object] = {"task": task or "transcribe"}
+            normalized_language = language or None
+            normalized_prompt = prompt or None
+            if normalized_language is not None:
+                generate_kwargs["language"] = normalized_language
+            if normalized_prompt is not None and hasattr(self._processor, "get_prompt_ids"):
+                prompt_ids = self._processor.get_prompt_ids(
+                    normalized_prompt,
+                    language=normalized_language,
+                    task=task or "transcribe",
+                )
+                if prompt_ids is not None:
+                    generate_kwargs["prompt_ids"] = prompt_ids
 
+            for start in range(0, len(entries), self._pipeline_batch_size):
+                chunk = entries[start : start + self._pipeline_batch_size]
                 batch_inputs = [
-                    {"array": audio_batch[index], "sampling_rate": sample_rates[index]} for index in indexes
+                    {"array": audio_segment, "sampling_rate": sample_rate} for _, _, audio_segment, sample_rate in chunk
                 ]
                 result = self._pipeline(
                     batch_inputs,
@@ -151,22 +159,23 @@ class TritonPythonModel:
                 )
                 if isinstance(result, dict):
                     result = [result]
-                if len(result) != len(indexes):
+                if len(result) != len(chunk):
                     raise pb_utils.TritonModelException(
-                        f"Whisper pipeline returned {len(result)} results for {len(indexes)} inputs"
+                        f"Whisper pipeline returned {len(result)} results for {len(chunk)} inputs"
                     )
-                for output_index, payload in zip(indexes, result, strict=True):
+                for (request_index, segment_index, _, _), payload in zip(chunk, result, strict=True):
                     if isinstance(payload, dict):
-                        transcripts[output_index] = str(payload.get("text", "")).strip()
+                        transcript = str(payload.get("text", "")).strip()
                     else:
-                        transcripts[output_index] = str(payload).strip()
+                        transcript = str(payload).strip()
+                    request_transcripts[request_index][segment_index] = transcript
 
-            responses.append(
-                pb_utils.InferenceResponse(
-                    output_tensors=[
-                        pb_utils.Tensor("transcript", np.asarray(transcripts, dtype=object)),
-                    ]
-                )
+        responses = [
+            pb_utils.InferenceResponse(
+                output_tensors=[
+                    pb_utils.Tensor("transcript", np.asarray(transcripts, dtype=object)),
+                ]
             )
-
+            for transcripts in request_transcripts
+        ]
         return responses

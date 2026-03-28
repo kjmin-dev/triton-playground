@@ -49,6 +49,7 @@ class LocalizationStageError(RuntimeError):
 class LocalizedTextAnalysis:
     transcript: str
     translated_text: str
+    translated_segment_texts: list[str]
     segments: list[TranscribedSegment]
     stt_elapsed_ms: int
     translation_elapsed_ms: int
@@ -156,6 +157,7 @@ class TritonLocalizeTextPipelineClient:
                     self._grpcclient.InferRequestedOutput("transcript"),
                     self._grpcclient.InferRequestedOutput("segments_json"),
                     self._grpcclient.InferRequestedOutput("translated_text"),
+                    self._grpcclient.InferRequestedOutput("translated_segments_json"),
                     self._grpcclient.InferRequestedOutput("stt_elapsed_ms"),
                     self._grpcclient.InferRequestedOutput("translation_elapsed_ms"),
                 ],
@@ -169,12 +171,14 @@ class TritonLocalizeTextPipelineClient:
         transcript_tensor = result.as_numpy("transcript")
         segments_tensor = result.as_numpy("segments_json")
         translated_text_tensor = result.as_numpy("translated_text")
+        translated_segments_tensor = result.as_numpy("translated_segments_json")
         stt_elapsed_ms_tensor = result.as_numpy("stt_elapsed_ms")
         translation_elapsed_ms_tensor = result.as_numpy("translation_elapsed_ms")
         if (
             transcript_tensor is None
             or segments_tensor is None
             or translated_text_tensor is None
+            or translated_segments_tensor is None
             or stt_elapsed_ms_tensor is None
             or translation_elapsed_ms_tensor is None
         ):
@@ -182,11 +186,15 @@ class TritonLocalizeTextPipelineClient:
 
         transcript = _decode_bytes_tensor(transcript_tensor)
         translated_text = _decode_bytes_tensor(translated_text_tensor)
+        translated_segment_texts = json.loads(_decode_bytes_tensor(translated_segments_tensor) or "[]")
+        if not isinstance(translated_segment_texts, list):
+            translated_segment_texts = []
         segments = _segments_from_json_payload(_decode_bytes_tensor(segments_tensor))
 
         return LocalizedTextAnalysis(
             transcript=transcript,
             translated_text=translated_text,
+            translated_segment_texts=[str(text).strip() for text in translated_segment_texts],
             segments=segments,
             stt_elapsed_ms=int(np.asarray(stt_elapsed_ms_tensor).reshape(-1)[0]),
             translation_elapsed_ms=int(np.asarray(translation_elapsed_ms_tensor).reshape(-1)[0]),
@@ -457,12 +465,53 @@ def _time_stretch(samples: np.ndarray, target_length: int) -> np.ndarray:
     return np.interp(tgt_pos, src_pos, samples).astype(np.float32)
 
 
+def _translate_segment_texts(
+    *,
+    segments: list[TranscribedSegment],
+    source_language: str | None,
+    target_language: str,
+    translation_client: TritonTranslationClient,
+) -> list[str]:
+    translated_segment_texts = [""] * len(segments)
+    non_empty_indexes = [index for index, segment in enumerate(segments) if segment.text.strip()]
+    if not non_empty_indexes:
+        return translated_segment_texts
+
+    texts = [segments[index].text.strip() for index in non_empty_indexes]
+    if hasattr(translation_client, "translate_many"):
+        translated_texts = translation_client.translate_many(
+            texts,
+            source_language=source_language,
+            target_language=target_language,
+        )
+    else:
+        translated_texts = [
+            translation_client.translate(
+                text,
+                source_language=source_language,
+                target_language=target_language,
+            )
+            for text in texts
+        ]
+
+    if len(translated_texts) != len(non_empty_indexes):
+        raise RuntimeError(
+            f"translation returned {len(translated_texts)} segment texts for {len(non_empty_indexes)} inputs"
+        )
+
+    for index, translated_text in zip(non_empty_indexes, translated_texts, strict=True):
+        translated_segment_texts[index] = translated_text.strip()
+
+    return translated_segment_texts
+
+
 def _synthesize_time_aligned(
     *,
     audio: AudioBuffer,
     diarized_segments: list[TranscribedSegment],
+    dub_texts: list[str],
     speaker_groups: dict[str, list[TranscribedSegment]],
-    translated_text: str,
+    source_language: str | None,
     tts_language: str,
     speaker_prompt: str | None,
     tts_client: TritonTtsClient,
@@ -480,9 +529,10 @@ def _synthesize_time_aligned(
     for sid in speaker_groups:
         speaker_refs[sid] = _select_reference_segment(audio, diarized_segments, speaker_id=sid)
 
+    allow_ref_text = source_language is not None and source_language == tts_language
     pending_segments: list[tuple[TranscribedSegment, TtsSynthesisRequest]] = []
-    for seg in diarized_segments:
-        if not seg.text.strip():
+    for seg, dub_text in zip(diarized_segments, dub_texts, strict=True):
+        if not dub_text.strip():
             continue
 
         sid = seg.speaker_id or "speaker_0"
@@ -491,12 +541,12 @@ def _synthesize_time_aligned(
             (
                 seg,
                 TtsSynthesisRequest(
-                    text=seg.text,
+                    text=dub_text,
                     language=tts_language,
                     speaker_prompt=speaker_prompt,
                     ref_audio=ref[0] if ref else None,
                     ref_audio_sample_rate=ref[2] if ref else 16000,
-                    ref_text=ref[1] if ref else None,
+                    ref_text=ref[1] if ref and allow_ref_text else None,
                 ),
             )
         )
@@ -561,7 +611,7 @@ def _synthesize_time_aligned(
         output = output[:trim_sample]
 
     n_speakers = len(speaker_groups)
-    vc_mode = "icl" if any(r and r[1] for r in speaker_refs.values()) else "x_vector"
+    vc_mode = "icl" if allow_ref_text and any(r and r[1] for r in speaker_refs.values()) else "x_vector"
 
     return SynthesizedAudio(sample_rate=sample_rate, samples=output), {
         "voice_cloning": True,
@@ -611,6 +661,7 @@ def localize_audio(
     stt_analysis: SttAnalysis
     t0 = time.monotonic()
     translated_text_from_pipeline: str | None = None
+    translated_segment_texts_from_pipeline: list[str] | None = None
     translation_elapsed_ms: int | None = None
     localized_audio: LocalizedAudioAnalysis | None = None
     localized_text: LocalizedTextAnalysis | None = None
@@ -665,6 +716,7 @@ def localize_audio(
             segments=localized_text.segments,
         )
         translated_text_from_pipeline = localized_text.translated_text
+        translated_segment_texts_from_pipeline = localized_text.translated_segment_texts
         stt_elapsed_ms = localized_text.stt_elapsed_ms
         translation_elapsed_ms = localized_text.translation_elapsed_ms
     else:
@@ -756,14 +808,16 @@ def localize_audio(
     # ── Translation stage ──
     if translated_text_from_pipeline is not None and translation_elapsed_ms is not None:
         translated_text = translated_text_from_pipeline.strip()
+        translated_segment_texts = translated_segment_texts_from_pipeline or [""] * len(diarized_segments)
     else:
         t0 = time.monotonic()
         try:
-            translated_text = translation_client.translate(
-                stt_analysis.transcript,
+            translated_segment_texts = _translate_segment_texts(
+                segments=diarized_segments,
                 source_language=normalized_source_language,
                 target_language=normalized_target_language,
-            ).strip()
+                translation_client=translation_client,
+            )
         except Exception as exc:
             raise LocalizationStageError(
                 stage="translation",
@@ -780,6 +834,7 @@ def localize_audio(
                 },
             ) from exc
 
+        translated_text = " ".join(text for text in translated_segment_texts if text).strip()
         translation_elapsed_ms = round((time.monotonic() - t0) * 1000)
     logger.info("Translation completed in %d ms", translation_elapsed_ms)
 
@@ -842,8 +897,9 @@ def localize_audio(
         synthesized, tts_meta = _synthesize_time_aligned(
             audio=audio,
             diarized_segments=diarized_segments,
+            dub_texts=translated_segment_texts,
             speaker_groups=speaker_groups,
-            translated_text=translated_text,
+            source_language=normalized_source_language,
             tts_language=tts_language,
             speaker_prompt=speaker_prompt,
             tts_client=tts_client,

@@ -74,9 +74,10 @@ class LocalizationPipelineTest(unittest.TestCase):
         self.assertEqual(payload["stages"]["translation"]["status"], "ok")
         self.assertEqual(payload["stages"]["tts"]["status"], "ok")
         self.assertEqual(translation.call, ("hello world", "en", "ko"))
-        # TTS is now called per-segment, so tts.call has the segment text
+        self.assertEqual(tts.call[0], "annyeong haseyo")
         self.assertEqual(tts.call[1], "ko")
         self.assertEqual(tts.call[2], "warm")
+        self.assertIsNone(tts.ref_text)
         self.assertTrue(payload["stages"]["tts"]["audio_base64"])
         self.assertTrue(payload["stages"]["tts"]["voice_cloning"])
         self.assertTrue(payload["stages"]["tts"]["time_aligned"])
@@ -186,6 +187,7 @@ class LocalizationPipelineTest(unittest.TestCase):
                 return LocalizedTextAnalysis(
                     transcript="hello world",
                     translated_text="annyeong haseyo",
+                    translated_segment_texts=["annyeong haseyo"],
                     stt_elapsed_ms=12,
                     translation_elapsed_ms=7,
                     segments=[
@@ -209,6 +211,7 @@ class LocalizationPipelineTest(unittest.TestCase):
 
         class FakeTtsClient:
             def synthesize_many(self, requests) -> list[SynthesizedAudio]:
+                self.call = (requests[0].text, requests[0].ref_text)
                 return [
                     SynthesizedAudio(sample_rate=24000, samples=np.linspace(-0.2, 0.2, num=480, dtype=np.float32))
                     for _ in requests
@@ -237,6 +240,7 @@ class LocalizationPipelineTest(unittest.TestCase):
         self.assertEqual(payload["stages"]["stt"]["elapsed_ms"], 12)
         self.assertEqual(payload["stages"]["translation"]["elapsed_ms"], 7)
         self.assertEqual(pipeline_client.call, (0.5, "en", "ko"))
+        self.assertEqual(payload["stages"]["tts"]["status"], "ok")
 
     def test_localize_audio_prefers_triton_localize_pipeline_when_available(self) -> None:
         audio = AudioBuffer(samples=np.ones(512 * 16, dtype=np.float32), sample_rate=16000)

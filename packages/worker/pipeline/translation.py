@@ -40,6 +40,11 @@ def normalize_pipeline_language(language: str | None, *, allow_auto: bool) -> st
 
 
 def _decode_string_output(tensor: np.ndarray | None, *, output_name: str) -> str:
+    outputs = _decode_string_outputs(tensor, output_name=output_name)
+    return outputs[0] if outputs else ""
+
+
+def _decode_string_outputs(tensor: np.ndarray | None, *, output_name: str) -> list[str]:
     if tensor is None:
         raise TritonUnavailableError(
             f"Triton inference succeeded but did not return the configured output tensor {output_name}."
@@ -59,7 +64,7 @@ def _decode_string_output(tensor: np.ndarray | None, *, output_name: str) -> str
         else:
             fragments.append(str(scalar))
 
-    return " ".join(fragment.strip() for fragment in fragments if fragment.strip())
+    return [fragment.strip() for fragment in fragments]
 
 
 class TritonTranslationClient:
@@ -101,19 +106,44 @@ class TritonTranslationClient:
         source_language: str | None,
         target_language: str,
     ) -> str:
+        translated = self.translate_many(
+            [text],
+            source_language=source_language,
+            target_language=target_language,
+        )
+        return translated[0] if translated else ""
+
+    def translate_many(
+        self,
+        texts: list[str],
+        *,
+        source_language: str | None,
+        target_language: str,
+    ) -> list[str]:
+        if not texts:
+            return []
+
         readiness = self.readiness()
         if not readiness.ready:
             raise TritonUnavailableError(readiness.summary)
 
         try:
-            text_input = self._grpcclient.InferInput(self._text_input_name, [1], "BYTES")
-            text_input.set_data_from_numpy(np.asarray([text], dtype=object))
+            text_input = self._grpcclient.InferInput(self._text_input_name, [len(texts)], "BYTES")
+            text_input.set_data_from_numpy(np.asarray(texts, dtype=object))
 
-            source_language_input = self._grpcclient.InferInput(self._source_language_input_name, [1], "BYTES")
-            source_language_input.set_data_from_numpy(np.asarray([source_language or ""], dtype=object))
+            source_language_input = self._grpcclient.InferInput(
+                self._source_language_input_name,
+                [len(texts)],
+                "BYTES",
+            )
+            source_language_input.set_data_from_numpy(np.asarray([source_language or ""] * len(texts), dtype=object))
 
-            target_language_input = self._grpcclient.InferInput(self._target_language_input_name, [1], "BYTES")
-            target_language_input.set_data_from_numpy(np.asarray([target_language], dtype=object))
+            target_language_input = self._grpcclient.InferInput(
+                self._target_language_input_name,
+                [len(texts)],
+                "BYTES",
+            )
+            target_language_input.set_data_from_numpy(np.asarray([target_language] * len(texts), dtype=object))
 
             result = self._client.infer(
                 self._model_name,
@@ -123,4 +153,9 @@ class TritonTranslationClient:
         except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
             raise TritonUnavailableError(f"Translation inference request failed: {exc}") from exc
 
-        return _decode_string_output(result.as_numpy(self._text_output_name), output_name=self._text_output_name)
+        outputs = _decode_string_outputs(result.as_numpy(self._text_output_name), output_name=self._text_output_name)
+        if len(outputs) != len(texts):
+            raise TritonUnavailableError(
+                f"Translation inference returned {len(outputs)} outputs for {len(texts)} requested texts."
+            )
+        return outputs

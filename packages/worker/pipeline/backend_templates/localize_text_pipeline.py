@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 
 import numpy as np
@@ -68,6 +69,14 @@ def _execute_subrequest(model_name: str, inputs: list[pb_utils.Tensor], requeste
     return response
 
 
+def _tensor_values_as_strings(tensor: np.ndarray) -> list[str]:
+    return [_decode_string(value).strip() for value in tensor.reshape(-1)]
+
+
+def _tensor_values_as_strings(tensor: np.ndarray) -> list[str]:
+    return [_decode_string(value).strip() for value in tensor.reshape(-1)]
+
+
 class TritonPythonModel:
     def initialize(self, args):
         _ = args
@@ -75,7 +84,7 @@ class TritonPythonModel:
         self._translation_model_name = "madlad400_3b_mt"
 
     def execute(self, requests):
-        responses = []
+        records: list[dict[str, object]] = []
         for request in requests:
             audio_pcm = _tensor_as_audio(request, "audio_pcm")
             sample_rate = _tensor_as_int(request, "sample_rate")
@@ -108,35 +117,91 @@ class TritonPythonModel:
             stt_elapsed_ms = int(round((time.perf_counter() - t0) * 1000))
             transcript = _decode_string(_request_output(stt_response, "transcript").reshape(-1)[0]).strip()
             segments_json = _decode_string(_request_output(stt_response, "segments_json").reshape(-1)[0])
+            segments = json.loads(segments_json or "[]")
 
-            translated_text = ""
-            translation_elapsed_ms = 0
-            if transcript:
-                t1 = time.perf_counter()
-                translation_response = _execute_subrequest(
-                    self._translation_model_name,
-                    [
-                        pb_utils.Tensor("text", np.asarray([transcript], dtype=object)),
-                        pb_utils.Tensor("source_language", np.asarray([source_language], dtype=object)),
-                        pb_utils.Tensor("target_language", np.asarray([target_language], dtype=object)),
-                    ],
-                    ["translated_text"],
+            records.append(
+                {
+                    "transcript": transcript,
+                    "segments_json": segments_json,
+                    "segments": segments,
+                    "stt_elapsed_ms": stt_elapsed_ms,
+                    "source_language": source_language,
+                    "target_language": target_language,
+                    "translated_text": "",
+                    "translated_segment_texts": ["" for _ in segments],
+                    "translation_elapsed_ms": 0,
+                }
+            )
+
+        segment_translation_items: list[tuple[int, int, str, str, str]] = []
+        for record_index, record in enumerate(records):
+            for segment_index, segment in enumerate(record["segments"]):
+                text = str(segment.get("text", "")).strip()
+                if not text:
+                    continue
+                segment_translation_items.append(
+                    (
+                        record_index,
+                        segment_index,
+                        text,
+                        str(record["source_language"]),
+                        str(record["target_language"]),
+                    )
                 )
-                translation_elapsed_ms = int(round((time.perf_counter() - t1) * 1000))
-                translated_text = _decode_string(
-                    _request_output(translation_response, "translated_text").reshape(-1)[0]
-                ).strip()
 
+        if segment_translation_items:
+            t1 = time.perf_counter()
+            translation_response = _execute_subrequest(
+                self._translation_model_name,
+                [
+                    pb_utils.Tensor(
+                        "text",
+                        np.asarray([item[2] for item in segment_translation_items], dtype=object),
+                    ),
+                    pb_utils.Tensor(
+                        "source_language",
+                        np.asarray([item[3] for item in segment_translation_items], dtype=object),
+                    ),
+                    pb_utils.Tensor(
+                        "target_language",
+                        np.asarray([item[4] for item in segment_translation_items], dtype=object),
+                    ),
+                ],
+                ["translated_text"],
+            )
+            translation_elapsed_ms = int(round((time.perf_counter() - t1) * 1000))
+            translated_texts = _tensor_values_as_strings(_request_output(translation_response, "translated_text"))
+            if len(translated_texts) != len(segment_translation_items):
+                raise pb_utils.TritonModelException(
+                    "translation model returned "
+                    f"{len(translated_texts)} outputs for {len(segment_translation_items)} inputs"
+                )
+            for item, translated_text in zip(segment_translation_items, translated_texts, strict=True):
+                record_index, segment_index, _, _, _ = item
+                records[record_index]["translated_segment_texts"][segment_index] = translated_text
+
+            for record in records:
+                record["translated_text"] = " ".join(
+                    text for text in record["translated_segment_texts"] if text
+                ).strip()
+                record["translation_elapsed_ms"] = translation_elapsed_ms
+
+        responses = []
+        for record in records:
             responses.append(
                 pb_utils.InferenceResponse(
                     output_tensors=[
-                        pb_utils.Tensor("transcript", np.asarray([transcript], dtype=object)),
-                        pb_utils.Tensor("segments_json", np.asarray([segments_json], dtype=object)),
-                        pb_utils.Tensor("translated_text", np.asarray([translated_text], dtype=object)),
-                        pb_utils.Tensor("stt_elapsed_ms", np.asarray([stt_elapsed_ms], dtype=np.int32)),
+                        pb_utils.Tensor("transcript", np.asarray([record["transcript"]], dtype=object)),
+                        pb_utils.Tensor("segments_json", np.asarray([record["segments_json"]], dtype=object)),
+                        pb_utils.Tensor("translated_text", np.asarray([record["translated_text"]], dtype=object)),
+                        pb_utils.Tensor(
+                            "translated_segments_json",
+                            np.asarray([json.dumps(record["translated_segment_texts"])], dtype=object),
+                        ),
+                        pb_utils.Tensor("stt_elapsed_ms", np.asarray([record["stt_elapsed_ms"]], dtype=np.int32)),
                         pb_utils.Tensor(
                             "translation_elapsed_ms",
-                            np.asarray([translation_elapsed_ms], dtype=np.int32),
+                            np.asarray([record["translation_elapsed_ms"]], dtype=np.int32),
                         ),
                     ]
                 )

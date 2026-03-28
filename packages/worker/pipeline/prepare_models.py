@@ -639,6 +639,13 @@ def _materialize_localize_text_pipeline(output_root: Path) -> None:
         ]
         output [
           {
+            name: "translated_segments_json"
+            data_type: TYPE_STRING
+            dims: [ 1 ]
+          }
+        ]
+        output [
+          {
             name: "stt_elapsed_ms"
             data_type: TYPE_INT32
             dims: [ 1 ]
@@ -661,9 +668,10 @@ def _materialize_localize_text_pipeline(output_root: Path) -> None:
 
 def _materialize_localize_pipeline(output_root: Path) -> None:
     """Create a Triton BLS pipeline that runs STT + translation + TTS inside the server."""
-    localize_text_backend = output_root / "localize_text_pipeline" / "1" / "model.py"
+    stt_pipeline_backend = output_root / "whisper_stt_pipeline" / "1" / "model.py"
+    translation_backend = output_root / "madlad400_3b_mt" / "1" / "model.py"
     tts_backend = output_root / "qwen3_tts_0_6b" / "1" / "model.py"
-    if not localize_text_backend.is_file() or not tts_backend.is_file():
+    if not stt_pipeline_backend.is_file() or not translation_backend.is_file() or not tts_backend.is_file():
         return
 
     model_root = output_root / "localize_pipeline"

@@ -74,7 +74,7 @@ class PrepareModelsTest(unittest.TestCase):
 
         self.assertFalse(translation["installed"])
         self.assertEqual(translation["repository_model_name"], "madlad400_3b_mt")
-        self.assertIn("translated_text: STRING[1] UTF-8 translated text", translation["triton_outputs"])
+        self.assertIn("translated_text: STRING[texts] UTF-8 translated text entries", translation["triton_outputs"])
 
         self.assertFalse(tts["installed"])
         self.assertEqual(tts["repository_model_name"], "qwen3_tts_0_6b")
@@ -212,16 +212,20 @@ class PrepareModelsTest(unittest.TestCase):
             self.assertTrue(pipeline_config.exists())
             self.assertTrue(pipeline_model.exists())
             self.assertIn('name: "localize_text_pipeline"', pipeline_config.read_text(encoding="utf-8"))
+            self.assertIn('name: "translated_segments_json"', pipeline_config.read_text(encoding="utf-8"))
             self.assertIn("translation_elapsed_ms", pipeline_model.read_text(encoding="utf-8"))
 
-    def test_materialize_localize_pipeline_when_localize_text_and_tts_are_present(self) -> None:
+    def test_materialize_localize_pipeline_when_stt_translation_and_tts_are_present(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_root = Path(temp_dir)
-            localize_text_root = output_root / "localize_text_pipeline" / "1"
+            stt_pipeline_root = output_root / "whisper_stt_pipeline" / "1"
+            translation_root = output_root / "madlad400_3b_mt" / "1"
             tts_root = output_root / "qwen3_tts_0_6b" / "1"
-            localize_text_root.mkdir(parents=True)
+            stt_pipeline_root.mkdir(parents=True)
+            translation_root.mkdir(parents=True)
             tts_root.mkdir(parents=True)
-            (localize_text_root / "model.py").write_text("# localize text pipeline\n", encoding="utf-8")
+            (stt_pipeline_root / "model.py").write_text("# stt pipeline\n", encoding="utf-8")
+            (translation_root / "model.py").write_text("# translation backend\n", encoding="utf-8")
             (tts_root / "model.py").write_text("# tts backend\n", encoding="utf-8")
 
             prepare_models_module._materialize_localize_pipeline(output_root)

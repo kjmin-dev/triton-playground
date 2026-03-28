@@ -142,7 +142,7 @@ class TritonPythonModel:
         self._whisper_model_name = "whisper_large_v3_turbo"
 
     def execute(self, requests):
-        responses = []
+        records: list[dict[str, object]] = []
         for request in requests:
             audio_pcm = _tensor_as_audio(request, "audio_pcm")
             sample_rate = _tensor_as_int(request, "sample_rate")
@@ -159,61 +159,136 @@ class TritonPythonModel:
             padded = np.pad(audio_pcm, (0, padded_sample_count - len(audio_pcm)))
             windows = padded.reshape(-1, window_samples).astype(np.float32)
 
+            records.append(
+                {
+                    "audio_pcm": audio_pcm,
+                    "sample_rate": sample_rate,
+                    "threshold": threshold,
+                    "min_speech_ms": min_speech_ms,
+                    "min_silence_ms": min_silence_ms,
+                    "pad_ms": pad_ms,
+                    "window_samples": window_samples,
+                    "task": task,
+                    "language": language,
+                    "prompt": prompt,
+                    "windows": windows,
+                    "segments": [],
+                    "transcript": "",
+                }
+            )
+
+        vad_groups: dict[int, list[int]] = {}
+        for record_index, record in enumerate(records):
+            vad_groups.setdefault(int(record["window_samples"]), []).append(record_index)
+
+        for record_indices in vad_groups.values():
+            audio_windows = np.concatenate(
+                [np.asarray(records[record_index]["windows"], dtype=np.float32) for record_index in record_indices],
+                axis=0,
+            )
             vad_response = _execute_subrequest(
                 self._vad_model_name,
                 [
-                    pb_utils.Tensor("audio_windows", windows),
+                    pb_utils.Tensor("audio_windows", audio_windows),
                     pb_utils.Tensor("sr", np.asarray([DEFAULT_MODEL_SAMPLE_RATE], dtype=np.int64)),
                 ],
                 ["probabilities"],
             )
-            probabilities = _request_output(vad_response, "probabilities").astype(float).tolist()
+            probabilities = np.asarray(_request_output(vad_response, "probabilities"), dtype=np.float32).reshape(-1)
 
-            segments = _speech_segments_from_probabilities(
-                probabilities=probabilities,
-                total_samples=len(audio_pcm),
-                sample_rate=sample_rate,
-                threshold=threshold,
-                min_speech_ms=min_speech_ms,
-                min_silence_ms=min_silence_ms,
-                pad_ms=pad_ms,
-                window_samples=window_samples,
-            )
-
-            transcript = ""
-            if segments:
-                max_samples = max(segment["sample_end"] - segment["sample_start"] for segment in segments)
-                audio_batch = np.zeros((len(segments), max_samples), dtype=np.float32)
-                audio_lengths = np.zeros(len(segments), dtype=np.int32)
-
-                for index, segment in enumerate(segments):
-                    start_sample = int(segment["sample_start"])
-                    end_sample = int(segment["sample_end"])
-                    clipped = audio_pcm[start_sample:end_sample].astype(np.float32)
-                    audio_batch[index, : len(clipped)] = clipped
-                    audio_lengths[index] = len(clipped)
-
-                batch_size = len(segments)
-                whisper_response = _execute_subrequest(
-                    self._whisper_model_name,
-                    [
-                        pb_utils.Tensor("audio_pcm", audio_batch),
-                        pb_utils.Tensor("audio_lengths", audio_lengths),
-                        pb_utils.Tensor("sample_rate", np.asarray([sample_rate] * batch_size, dtype=np.int32)),
-                        pb_utils.Tensor("task", np.asarray([task] * batch_size, dtype=object)),
-                        pb_utils.Tensor("language", np.asarray([language] * batch_size, dtype=object)),
-                        pb_utils.Tensor("prompt", np.asarray([prompt] * batch_size, dtype=object)),
-                    ],
-                    ["transcript"],
+            offset = 0
+            for record_index in record_indices:
+                record = records[record_index]
+                window_count = int(np.asarray(record["windows"]).shape[0])
+                record_probabilities = probabilities[offset : offset + window_count].astype(float).tolist()
+                offset += window_count
+                record["segments"] = _speech_segments_from_probabilities(
+                    probabilities=record_probabilities,
+                    total_samples=len(np.asarray(record["audio_pcm"], dtype=np.float32)),
+                    sample_rate=int(record["sample_rate"]),
+                    threshold=float(record["threshold"]),
+                    min_speech_ms=int(record["min_speech_ms"]),
+                    min_silence_ms=int(record["min_silence_ms"]),
+                    pad_ms=int(record["pad_ms"]),
+                    window_samples=int(record["window_samples"]),
                 )
-                transcripts = [_decode_string(item).strip() for item in _request_output(whisper_response, "transcript")]
-                for segment, segment_text in zip(segments, transcripts, strict=True):
-                    segment["text"] = segment_text
-                    segment.pop("sample_start", None)
-                    segment.pop("sample_end", None)
-                transcript = " ".join(text for text in transcripts if text).strip()
-            else:
-                segments = []
+
+        whisper_items: list[tuple[int, int, np.ndarray, int, str, str, str]] = []
+        for record_index, record in enumerate(records):
+            audio_pcm = np.asarray(record["audio_pcm"], dtype=np.float32)
+            for segment_index, segment in enumerate(record["segments"]):
+                start_sample = int(segment["sample_start"])
+                end_sample = int(segment["sample_end"])
+                whisper_items.append(
+                    (
+                        record_index,
+                        segment_index,
+                        audio_pcm[start_sample:end_sample].astype(np.float32),
+                        int(record["sample_rate"]),
+                        str(record["task"]),
+                        str(record["language"]),
+                        str(record["prompt"]),
+                    )
+                )
+
+        if whisper_items:
+            max_samples = max(audio_segment.size for _, _, audio_segment, _, _, _, _ in whisper_items)
+            batch_size = len(whisper_items)
+            audio_batch = np.zeros((batch_size, max_samples), dtype=np.float32)
+            audio_lengths = np.zeros(batch_size, dtype=np.int32)
+
+            for index, (_, _, audio_segment, _, _, _, _) in enumerate(whisper_items):
+                audio_batch[index, : audio_segment.size] = audio_segment
+                audio_lengths[index] = audio_segment.size
+
+            whisper_response = _execute_subrequest(
+                self._whisper_model_name,
+                [
+                    pb_utils.Tensor("audio_pcm", audio_batch),
+                    pb_utils.Tensor("audio_lengths", audio_lengths),
+                    pb_utils.Tensor(
+                        "sample_rate",
+                        np.asarray([sample_rate for _, _, _, sample_rate, _, _, _ in whisper_items], dtype=np.int32),
+                    ),
+                    pb_utils.Tensor(
+                        "task", np.asarray([task for _, _, _, _, task, _, _ in whisper_items], dtype=object)
+                    ),
+                    pb_utils.Tensor(
+                        "language",
+                        np.asarray([language for _, _, _, _, _, language, _ in whisper_items], dtype=object),
+                    ),
+                    pb_utils.Tensor(
+                        "prompt",
+                        np.asarray([prompt for _, _, _, _, _, _, prompt in whisper_items], dtype=object),
+                    ),
+                ],
+                ["transcript"],
+            )
+            transcripts = [_decode_string(item).strip() for item in _request_output(whisper_response, "transcript")]
+            if len(transcripts) != len(whisper_items):
+                raise pb_utils.TritonModelException(
+                    f"Whisper returned {len(transcripts)} transcripts for {len(whisper_items)} segments"
+                )
+            for (record_index, segment_index, _, _, _, _, _), segment_text in zip(
+                whisper_items,
+                transcripts,
+                strict=True,
+            ):
+                segment = records[record_index]["segments"][segment_index]
+                segment["text"] = segment_text
+
+        responses = []
+        for record in records:
+            segments = list(record["segments"])
+            transcript = ""
+            for segment in segments:
+                segment.pop("sample_start", None)
+                segment.pop("sample_end", None)
+            if segments:
+                transcript = " ".join(
+                    str(segment.get("text", "")).strip() for segment in segments if segment.get("text")
+                )
+                transcript = transcript.strip()
 
             responses.append(
                 pb_utils.InferenceResponse(

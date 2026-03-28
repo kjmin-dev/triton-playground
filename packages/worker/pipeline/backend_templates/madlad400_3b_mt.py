@@ -13,21 +13,30 @@ TARGET_PREFIX = {
 }
 
 
-def _tensor_as_bytes(request, name: str) -> str:
+def _decode_string(value: object) -> str:
+    scalar = value.item() if hasattr(value, "item") else value
+    if isinstance(scalar, bytes):
+        return scalar.decode("utf-8")
+    if isinstance(scalar, str):
+        return scalar
+    return str(scalar)
+
+
+def _tensor_as_bytes_list(request, name: str, expected_count: int | None = None) -> list[str]:
     tensor = pb_utils.get_input_tensor_by_name(request, name)
     if tensor is None:
         raise pb_utils.TritonModelException(f"missing required input tensor: {name}")
 
-    flattened = tensor.as_numpy().reshape(-1)
-    if flattened.size == 0:
-        return ""
-
-    value = flattened[0].item() if hasattr(flattened[0], "item") else flattened[0]
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    if isinstance(value, str):
-        return value
-    return str(value)
+    values = [_decode_string(item) for item in tensor.as_numpy().reshape(-1)]
+    if expected_count is None:
+        return values
+    if len(values) == 1 and expected_count > 1:
+        return values * expected_count
+    if len(values) != expected_count:
+        raise pb_utils.TritonModelException(
+            f"{name} tensor expected {expected_count} values but received {len(values)}"
+        )
+    return values
 
 
 class TritonPythonModel:
@@ -54,21 +63,36 @@ class TritonPythonModel:
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         )
         self._model = self._model.to(self._device)
+        self._generate_batch_size = 8
 
     def execute(self, requests):
-        responses = []
+        request_output_counts: list[int] = []
+        flattened_inputs: list[str] = []
+
         for request in requests:
-            text = _tensor_as_bytes(request, "text").strip()
-            target_language = _tensor_as_bytes(request, "target_language").strip().lower()
-            _ = _tensor_as_bytes(request, "source_language")
+            texts = [text.strip() for text in _tensor_as_bytes_list(request, "text")]
+            if not texts:
+                raise pb_utils.TritonModelException("text tensor is empty")
 
-            prefix = TARGET_PREFIX.get(target_language)
-            if prefix is None:
-                raise pb_utils.TritonModelException(f"unsupported translation target language: {target_language}")
+            target_languages = [
+                value.strip().lower() for value in _tensor_as_bytes_list(request, "target_language", len(texts))
+            ]
+            _ = _tensor_as_bytes_list(request, "source_language", len(texts))
 
+            request_output_counts.append(len(texts))
+            for text, target_language in zip(texts, target_languages, strict=True):
+                prefix = TARGET_PREFIX.get(target_language)
+                if prefix is None:
+                    raise pb_utils.TritonModelException(f"unsupported translation target language: {target_language}")
+                flattened_inputs.append(f"{prefix} {text}".strip())
+
+        decoded_outputs: list[str] = []
+        for start in range(0, len(flattened_inputs), self._generate_batch_size):
+            chunk = flattened_inputs[start : start + self._generate_batch_size]
             encoded = self._tokenizer(
-                f"{prefix} {text}",
+                chunk,
                 return_tensors="pt",
+                padding=True,
                 truncation=True,
             )
             encoded = {key: value.to(self._device) for key, value in encoded.items()}
@@ -76,15 +100,23 @@ class TritonPythonModel:
             with self._torch.inference_mode():
                 generated = self._model.generate(**encoded, max_new_tokens=512)
 
-            translated_text = self._tokenizer.batch_decode(
-                generated,
-                skip_special_tokens=True,
-            )[0].strip()
+            decoded_outputs.extend(
+                text.strip()
+                for text in self._tokenizer.batch_decode(
+                    generated,
+                    skip_special_tokens=True,
+                )
+            )
 
+        responses = []
+        output_index = 0
+        for output_count in request_output_counts:
+            translated_texts = decoded_outputs[output_index : output_index + output_count]
+            output_index += output_count
             responses.append(
                 pb_utils.InferenceResponse(
                     output_tensors=[
-                        pb_utils.Tensor("translated_text", np.asarray([translated_text], dtype=object)),
+                        pb_utils.Tensor("translated_text", np.asarray(translated_texts, dtype=object)),
                     ]
                 )
             )

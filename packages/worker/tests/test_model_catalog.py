@@ -52,7 +52,7 @@ class ModelCatalogTest(unittest.TestCase):
 
         self.assertEqual(translation.repository_model_name, "madlad400_3b_mt")
         self.assertEqual(translation.triton_backend, "python")
-        self.assertIn("translated_text: STRING[1] UTF-8 translated text", translation.triton_outputs)
+        self.assertIn("translated_text: STRING[texts] UTF-8 translated text entries", translation.triton_outputs)
         self.assertTrue(translation.snapshot_allow_patterns)
         self.assertEqual(translation.runtime_bundle, "localize-runtime")
         self.assertIn("transformers>=4.55", translation.runtime_pip_packages)

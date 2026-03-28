@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 
 import numpy as np
@@ -8,6 +9,7 @@ import triton_python_backend_utils as pb_utils
 
 _REF_MIN_DURATION_MS = 2000
 _REF_MAX_DURATION_MS = 10000
+_DEFAULT_MODEL_SAMPLE_RATE = 16000
 
 _N_MELS = 40
 _HOP_LENGTH = 160
@@ -74,6 +76,73 @@ def _execute_subrequest(model_name: str, inputs: list[pb_utils.Tensor], requeste
     if response.has_error():
         raise pb_utils.TritonModelException(response.error().message())
     return response
+
+
+def _tensor_values_as_strings(tensor: np.ndarray) -> list[str]:
+    return [_decode_string(value).strip() for value in tensor.reshape(-1)]
+
+
+def _speech_segments_from_probabilities(
+    *,
+    probabilities: list[float],
+    total_samples: int,
+    sample_rate: int,
+    threshold: float,
+    min_speech_ms: int,
+    min_silence_ms: int,
+    pad_ms: int,
+    window_samples: int,
+) -> list[dict[str, object]]:
+    window_ms = window_samples * 1000.0 / sample_rate
+
+    raw_runs: list[tuple[int, int]] = []
+    run_start: int | None = None
+    for index, probability in enumerate(probabilities):
+        if probability >= threshold:
+            if run_start is None:
+                run_start = index
+            continue
+
+        if run_start is not None:
+            raw_runs.append((run_start, index))
+            run_start = None
+
+    if run_start is not None:
+        raw_runs.append((run_start, len(probabilities)))
+
+    min_speech_windows = max(1, math.ceil(min_speech_ms / window_ms))
+    min_silence_windows = max(1, math.ceil(min_silence_ms / window_ms))
+    pad_samples = round(pad_ms * sample_rate / 1000)
+
+    merged_runs: list[tuple[int, int]] = []
+    for start, end in raw_runs:
+        if merged_runs and start - merged_runs[-1][1] <= min_silence_windows:
+            previous_start, _ = merged_runs[-1]
+            merged_runs[-1] = (previous_start, end)
+        else:
+            merged_runs.append((start, end))
+
+    segments: list[dict[str, object]] = []
+    for start, end in merged_runs:
+        if end - start < min_speech_windows:
+            continue
+
+        segment_start_sample = max(0, start * window_samples - pad_samples)
+        segment_end_sample = min(total_samples, end * window_samples + pad_samples)
+        run_probabilities = probabilities[start:end]
+        segments.append(
+            {
+                "start_ms": int(round(segment_start_sample * 1000 / sample_rate)),
+                "end_ms": int(round(segment_end_sample * 1000 / sample_rate)),
+                "duration_ms": int(round((segment_end_sample - segment_start_sample) * 1000 / sample_rate)),
+                "average_probability": float(sum(run_probabilities) / len(run_probabilities)),
+                "peak_probability": float(max(run_probabilities)),
+                "sample_start": int(segment_start_sample),
+                "sample_end": int(segment_end_sample),
+            }
+        )
+
+    return segments
 
 
 def _slice_audio(samples: np.ndarray, sample_rate: int, start_ms: int, end_ms: int) -> np.ndarray:
@@ -262,12 +331,12 @@ def _serialize_segments(segments: list[dict[str, object]]) -> str:
 class TritonPythonModel:
     def initialize(self, args):
         _ = args
-        self._localize_text_pipeline_model_name = "localize_text_pipeline"
+        self._vad_model_name = "silero_vad_streaming"
+        self._whisper_model_name = "whisper_large_v3_turbo"
+        self._translation_model_name = "madlad400_3b_mt"
         self._tts_model_name = "qwen3_tts_0_6b"
 
-    def _run_tts_batch(
-        self, requests: list[dict[str, object]], language: str, speaker_prompt: str
-    ) -> list[tuple[np.ndarray, int]]:
+    def _run_tts_batch(self, requests: list[dict[str, object]]) -> list[tuple[np.ndarray, int]]:
         if not requests:
             return []
 
@@ -294,8 +363,13 @@ class TritonPythonModel:
             self._tts_model_name,
             [
                 pb_utils.Tensor("text", np.asarray([str(request["text"]) for request in requests], dtype=object)),
-                pb_utils.Tensor("language", np.asarray([language] * len(requests), dtype=object)),
-                pb_utils.Tensor("speaker_prompt", np.asarray([speaker_prompt] * len(requests), dtype=object)),
+                pb_utils.Tensor(
+                    "language", np.asarray([str(request["language"]) for request in requests], dtype=object)
+                ),
+                pb_utils.Tensor(
+                    "speaker_prompt",
+                    np.asarray([str(request["speaker_prompt"]) for request in requests], dtype=object),
+                ),
                 pb_utils.Tensor("ref_audio", ref_audio_batch),
                 pb_utils.Tensor("ref_audio_lengths", ref_audio_lengths),
                 pb_utils.Tensor(
@@ -318,15 +392,17 @@ class TritonPythonModel:
             outputs.append((waveform, int(sample_rates[index])))
         return outputs
 
-    def _synthesize_time_aligned(
+    def _build_tts_requests(
         self,
         audio_pcm: np.ndarray,
         sample_rate: int,
         diarized_segments: list[dict[str, object]],
+        dub_texts: list[str],
         speaker_groups: dict[str, list[dict[str, object]]],
+        source_language: str,
         tts_language: str,
         speaker_prompt: str,
-    ) -> tuple[np.ndarray, int, dict[str, object]]:
+    ) -> tuple[list[dict[str, object]], dict[str, object]]:
         speaker_refs: dict[str, tuple[np.ndarray, str] | None] = {}
         for speaker_id in speaker_groups:
             speaker_refs[speaker_id] = _select_reference_segment(
@@ -336,44 +412,41 @@ class TritonPythonModel:
                 speaker_id=speaker_id,
             )
 
+        allow_ref_text = bool(source_language.strip()) and source_language.strip() == tts_language.strip()
         pending_requests: list[dict[str, object]] = []
-        for segment in diarized_segments:
-            if not str(segment.get("text", "")).strip():
+        for segment, dub_text in zip(diarized_segments, dub_texts, strict=True):
+            if not dub_text.strip():
                 continue
             speaker_id = str(segment.get("speaker_id") or "speaker_0")
             ref = speaker_refs.get(speaker_id)
             pending_requests.append(
                 {
                     "segment": segment,
-                    "text": str(segment.get("text", "")),
+                    "text": dub_text,
+                    "language": tts_language,
+                    "speaker_prompt": speaker_prompt,
                     "ref_audio": ref[0] if ref is not None else None,
-                    "ref_text": ref[1] if ref is not None else "",
+                    "ref_text": ref[1] if ref is not None and allow_ref_text else "",
                 }
             )
 
-        synthesized_segments: list[tuple[dict[str, object], np.ndarray, int]] = []
-        if pending_requests:
-            try:
-                batch_outputs = self._run_tts_batch(pending_requests, tts_language, speaker_prompt)
-                synthesized_segments = [
-                    (request["segment"], waveform, synth_sample_rate)
-                    for request, (waveform, synth_sample_rate) in zip(
-                        pending_requests,
-                        batch_outputs,
-                        strict=True,
-                    )
-                ]
-            except pb_utils.TritonModelException:
-                synthesized_segments = []
+        return pending_requests, {
+            "speaker_refs": speaker_refs,
+            "speaker_groups": speaker_groups,
+            "allow_ref_text": allow_ref_text,
+        }
 
-        if not synthesized_segments:
-            for request in pending_requests:
-                try:
-                    waveform, synth_sample_rate = self._run_tts_batch([request], tts_language, speaker_prompt)[0]
-                except pb_utils.TritonModelException:
-                    continue
-                synthesized_segments.append((request["segment"], waveform, synth_sample_rate))
-
+    def _render_time_aligned_output(
+        self,
+        *,
+        audio_pcm: np.ndarray,
+        sample_rate: int,
+        diarized_segments: list[dict[str, object]],
+        synthesized_segments: list[tuple[dict[str, object], np.ndarray, int]],
+        speaker_groups: dict[str, list[dict[str, object]]],
+        speaker_refs: dict[str, tuple[np.ndarray, str] | None],
+        allow_ref_text: bool,
+    ) -> tuple[np.ndarray, int, dict[str, object]]:
         output_sample_rate = 24000
         for _, _, synth_sample_rate in synthesized_segments:
             output_sample_rate = synth_sample_rate
@@ -398,7 +471,7 @@ class TritonPythonModel:
             trim_sample = min(len(output), int((int(last_segment["end_ms"]) + 500) * output_sample_rate / 1000))
             output = output[:trim_sample]
 
-        vc_mode = "icl" if any(ref and ref[1] for ref in speaker_refs.values()) else "x_vector"
+        vc_mode = "icl" if allow_ref_text and any(ref and ref[1] for ref in speaker_refs.values()) else "x_vector"
         return (
             output,
             output_sample_rate,
@@ -413,8 +486,63 @@ class TritonPythonModel:
             },
         )
 
+    def _synthesize_time_aligned(
+        self,
+        audio_pcm: np.ndarray,
+        sample_rate: int,
+        diarized_segments: list[dict[str, object]],
+        dub_texts: list[str],
+        speaker_groups: dict[str, list[dict[str, object]]],
+        source_language: str,
+        tts_language: str,
+        speaker_prompt: str,
+    ) -> tuple[np.ndarray, int, dict[str, object]]:
+        pending_requests, context = self._build_tts_requests(
+            audio_pcm,
+            sample_rate,
+            diarized_segments,
+            dub_texts,
+            speaker_groups,
+            source_language,
+            tts_language,
+            speaker_prompt,
+        )
+        synthesized_segments: list[tuple[dict[str, object], np.ndarray, int]] = []
+        if pending_requests:
+            try:
+                batch_outputs = self._run_tts_batch(pending_requests)
+                synthesized_segments = [
+                    (request["segment"], waveform, synth_sample_rate)
+                    for request, (waveform, synth_sample_rate) in zip(
+                        pending_requests,
+                        batch_outputs,
+                        strict=True,
+                    )
+                ]
+            except pb_utils.TritonModelException:
+                synthesized_segments = []
+
+        if not synthesized_segments:
+            for request in pending_requests:
+                try:
+                    waveform, synth_sample_rate = self._run_tts_batch([request])[0]
+                except pb_utils.TritonModelException:
+                    continue
+                synthesized_segments.append((request["segment"], waveform, synth_sample_rate))
+
+        return self._render_time_aligned_output(
+            audio_pcm=audio_pcm,
+            sample_rate=sample_rate,
+            diarized_segments=diarized_segments,
+            synthesized_segments=synthesized_segments,
+            speaker_groups=context["speaker_groups"],
+            speaker_refs=context["speaker_refs"],
+            allow_ref_text=bool(context["allow_ref_text"]),
+        )
+
     def execute(self, requests):
-        responses = []
+        stt_t0 = time.perf_counter()
+        records: list[dict[str, object]] = []
         for request in requests:
             audio_pcm = _tensor_as_audio(request, "audio_pcm")
             sample_rate = _tensor_as_int(request, "sample_rate")
@@ -428,70 +556,326 @@ class TritonPythonModel:
             prompt = _tensor_as_string(request, "prompt")
             speaker_prompt = _tensor_as_string(request, "speaker_prompt")
 
-            localize_text_response = _execute_subrequest(
-                self._localize_text_pipeline_model_name,
-                [
-                    pb_utils.Tensor("audio_pcm", audio_pcm.reshape(1, -1).astype(np.float32)),
-                    pb_utils.Tensor("sample_rate", np.asarray([sample_rate], dtype=np.int32)),
-                    pb_utils.Tensor("threshold", np.asarray([threshold], dtype=np.float32)),
-                    pb_utils.Tensor("min_speech_ms", np.asarray([min_speech_ms], dtype=np.int32)),
-                    pb_utils.Tensor("min_silence_ms", np.asarray([min_silence_ms], dtype=np.int32)),
-                    pb_utils.Tensor("pad_ms", np.asarray([pad_ms], dtype=np.int32)),
-                    pb_utils.Tensor("window_samples", np.asarray([window_samples], dtype=np.int32)),
-                    pb_utils.Tensor("source_language", np.asarray([source_language], dtype=object)),
-                    pb_utils.Tensor("target_language", np.asarray([target_language], dtype=object)),
-                    pb_utils.Tensor("prompt", np.asarray([prompt], dtype=object)),
-                ],
-                [
-                    "transcript",
-                    "segments_json",
-                    "translated_text",
-                    "stt_elapsed_ms",
-                    "translation_elapsed_ms",
-                ],
+            padded_sample_count = math.ceil(len(audio_pcm) / window_samples) * window_samples
+            padded = np.pad(audio_pcm, (0, padded_sample_count - len(audio_pcm)))
+            windows = padded.reshape(-1, window_samples).astype(np.float32)
+
+            records.append(
+                {
+                    "audio_pcm": audio_pcm,
+                    "sample_rate": sample_rate,
+                    "threshold": threshold,
+                    "min_speech_ms": min_speech_ms,
+                    "min_silence_ms": min_silence_ms,
+                    "pad_ms": pad_ms,
+                    "window_samples": window_samples,
+                    "source_language": source_language,
+                    "target_language": target_language,
+                    "speaker_prompt": speaker_prompt,
+                    "prompt": prompt,
+                    "windows": windows,
+                    "segments": [],
+                    "transcript": "",
+                    "stt_elapsed_ms": 0,
+                    "translated_segment_texts": [],
+                    "translated_text": "",
+                    "translation_elapsed_ms": 0,
+                }
             )
 
-            transcript = _decode_string(_request_output(localize_text_response, "transcript").reshape(-1)[0]).strip()
-            translated_text = _decode_string(
-                _request_output(localize_text_response, "translated_text").reshape(-1)[0]
-            ).strip()
-            stt_elapsed_ms = int(np.asarray(_request_output(localize_text_response, "stt_elapsed_ms")).reshape(-1)[0])
-            translation_elapsed_ms = int(
-                np.asarray(_request_output(localize_text_response, "translation_elapsed_ms")).reshape(-1)[0]
-            )
-            segments_json = _decode_string(_request_output(localize_text_response, "segments_json").reshape(-1)[0])
-            segments = json.loads(segments_json or "[]")
+        vad_groups: dict[int, list[int]] = {}
+        for record_index, record in enumerate(records):
+            vad_groups.setdefault(int(record["window_samples"]), []).append(record_index)
 
-            speaker_ids = _assign_speakers(audio_pcm, sample_rate, segments)
+        for record_indices in vad_groups.values():
+            audio_windows = np.concatenate(
+                [np.asarray(records[record_index]["windows"], dtype=np.float32) for record_index in record_indices],
+                axis=0,
+            )
+            vad_response = _execute_subrequest(
+                self._vad_model_name,
+                [
+                    pb_utils.Tensor("audio_windows", audio_windows),
+                    pb_utils.Tensor("sr", np.asarray([_DEFAULT_MODEL_SAMPLE_RATE], dtype=np.int64)),
+                ],
+                ["probabilities"],
+            )
+            probabilities = np.asarray(_request_output(vad_response, "probabilities"), dtype=np.float32).reshape(-1)
+
+            offset = 0
+            for record_index in record_indices:
+                record = records[record_index]
+                window_count = int(np.asarray(record["windows"]).shape[0])
+                record_probabilities = probabilities[offset : offset + window_count].astype(float).tolist()
+                offset += window_count
+                segments = _speech_segments_from_probabilities(
+                    probabilities=record_probabilities,
+                    total_samples=len(np.asarray(record["audio_pcm"], dtype=np.float32)),
+                    sample_rate=int(record["sample_rate"]),
+                    threshold=float(record["threshold"]),
+                    min_speech_ms=int(record["min_speech_ms"]),
+                    min_silence_ms=int(record["min_silence_ms"]),
+                    pad_ms=int(record["pad_ms"]),
+                    window_samples=int(record["window_samples"]),
+                )
+                record["segments"] = segments
+                record["translated_segment_texts"] = ["" for _ in segments]
+
+        whisper_items: list[tuple[int, int, np.ndarray, int, str, str]] = []
+        for record_index, record in enumerate(records):
+            audio_pcm = np.asarray(record["audio_pcm"], dtype=np.float32)
+            for segment_index, segment in enumerate(record["segments"]):
+                start_sample = int(segment["sample_start"])
+                end_sample = int(segment["sample_end"])
+                whisper_items.append(
+                    (
+                        record_index,
+                        segment_index,
+                        audio_pcm[start_sample:end_sample].astype(np.float32),
+                        int(record["sample_rate"]),
+                        str(record["source_language"]),
+                        str(record["prompt"]),
+                    )
+                )
+
+        if whisper_items:
+            max_samples = max(audio_segment.size for _, _, audio_segment, _, _, _ in whisper_items)
+            batch_size = len(whisper_items)
+            audio_batch = np.zeros((batch_size, max_samples), dtype=np.float32)
+            audio_lengths = np.zeros(batch_size, dtype=np.int32)
+
+            for index, (_, _, audio_segment, _, _, _) in enumerate(whisper_items):
+                audio_batch[index, : audio_segment.size] = audio_segment
+                audio_lengths[index] = audio_segment.size
+
+            whisper_response = _execute_subrequest(
+                self._whisper_model_name,
+                [
+                    pb_utils.Tensor("audio_pcm", audio_batch),
+                    pb_utils.Tensor("audio_lengths", audio_lengths),
+                    pb_utils.Tensor(
+                        "sample_rate",
+                        np.asarray([sample_rate for _, _, _, sample_rate, _, _ in whisper_items], dtype=np.int32),
+                    ),
+                    pb_utils.Tensor("task", np.asarray(["transcribe"] * batch_size, dtype=object)),
+                    pb_utils.Tensor(
+                        "language",
+                        np.asarray([source_language for _, _, _, _, source_language, _ in whisper_items], dtype=object),
+                    ),
+                    pb_utils.Tensor(
+                        "prompt",
+                        np.asarray([prompt for _, _, _, _, _, prompt in whisper_items], dtype=object),
+                    ),
+                ],
+                ["transcript"],
+            )
+            transcripts = [_decode_string(item).strip() for item in _request_output(whisper_response, "transcript")]
+            if len(transcripts) != len(whisper_items):
+                raise pb_utils.TritonModelException(
+                    f"Whisper returned {len(transcripts)} transcripts for {len(whisper_items)} segments"
+                )
+            for (record_index, segment_index, _, _, _, _), segment_text in zip(
+                whisper_items,
+                transcripts,
+                strict=True,
+            ):
+                records[record_index]["segments"][segment_index]["text"] = segment_text
+
+        stt_elapsed_ms = int(round((time.perf_counter() - stt_t0) * 1000))
+        for record in records:
+            segments = list(record["segments"])
+            transcript = ""
+            for segment in segments:
+                segment.pop("sample_start", None)
+                segment.pop("sample_end", None)
+            if segments:
+                transcript = " ".join(
+                    str(segment.get("text", "")).strip() for segment in segments if segment.get("text")
+                )
+                transcript = transcript.strip()
+            record["segments"] = segments
+            record["transcript"] = transcript
+            record["stt_elapsed_ms"] = stt_elapsed_ms
+
+        segment_translation_items: list[tuple[int, int, str, str, str]] = []
+        for record_index, record in enumerate(records):
+            for segment_index, segment in enumerate(record["segments"]):
+                text = str(segment.get("text", "")).strip()
+                if not text:
+                    continue
+                segment_translation_items.append(
+                    (
+                        record_index,
+                        segment_index,
+                        text,
+                        str(record["source_language"]),
+                        str(record["target_language"]),
+                    )
+                )
+
+        if segment_translation_items:
+            t1 = time.perf_counter()
+            translation_response = _execute_subrequest(
+                self._translation_model_name,
+                [
+                    pb_utils.Tensor(
+                        "text",
+                        np.asarray([item[2] for item in segment_translation_items], dtype=object),
+                    ),
+                    pb_utils.Tensor(
+                        "source_language",
+                        np.asarray([item[3] for item in segment_translation_items], dtype=object),
+                    ),
+                    pb_utils.Tensor(
+                        "target_language",
+                        np.asarray([item[4] for item in segment_translation_items], dtype=object),
+                    ),
+                ],
+                ["translated_text"],
+            )
+            translation_elapsed_ms = int(round((time.perf_counter() - t1) * 1000))
+            translated_texts = _tensor_values_as_strings(_request_output(translation_response, "translated_text"))
+            if len(translated_texts) != len(segment_translation_items):
+                raise pb_utils.TritonModelException(
+                    "translation model returned "
+                    f"{len(translated_texts)} outputs for {len(segment_translation_items)} inputs"
+                )
+            for item, translated_text in zip(segment_translation_items, translated_texts, strict=True):
+                record_index, segment_index, _, _, _ = item
+                records[record_index]["translated_segment_texts"][segment_index] = translated_text
+
+            for record in records:
+                record["translated_text"] = " ".join(
+                    text for text in record["translated_segment_texts"] if text
+                ).strip()
+                record["translation_elapsed_ms"] = translation_elapsed_ms
+
+        for record in records:
+            audio_pcm = np.asarray(record["audio_pcm"], dtype=np.float32)
+            sample_rate = int(record["sample_rate"])
+            speaker_ids = _assign_speakers(audio_pcm, sample_rate, list(record["segments"]))
             diarized_segments: list[dict[str, object]] = []
-            for segment, speaker_id in zip(segments, speaker_ids, strict=True):
+            for segment, speaker_id in zip(record["segments"], speaker_ids, strict=True):
                 item = dict(segment)
                 if speaker_id is not None:
                     item["speaker_id"] = speaker_id
                 diarized_segments.append(item)
+            record["diarized_segments"] = diarized_segments
 
-            tts_elapsed_ms = 0
-            audio_output = np.zeros(1, dtype=np.float32)
-            audio_length = 0
-            synthesized_sample_rate = 24000
+            record["tts_elapsed_ms"] = 0
+            record["audio_output"] = np.zeros(1, dtype=np.float32)
+            record["audio_length"] = 0
+            record["synthesized_sample_rate"] = 24000
+            record["tts_pending_requests"] = []
+            record["speaker_groups"] = {}
+            record["speaker_refs"] = {}
+            record["allow_ref_text"] = False
 
+            transcript = str(record["transcript"])
+            translated_text = str(record["translated_text"])
             if not transcript:
-                tts_meta = {"status": "skipped", "reason": "No transcript text was produced."}
+                record["tts_meta"] = {"status": "skipped", "reason": "No transcript text was produced."}
             elif not translated_text:
-                tts_meta = {"status": "skipped", "reason": "Translation returned empty text."}
+                record["tts_meta"] = {"status": "skipped", "reason": "Translation returned empty text."}
             else:
-                t0 = time.perf_counter()
                 speaker_groups = _group_segments_by_speaker(diarized_segments)
-                audio_output, synthesized_sample_rate, tts_meta = self._synthesize_time_aligned(
+                pending_requests, context = self._build_tts_requests(
                     audio_pcm,
                     sample_rate,
                     diarized_segments,
+                    list(record["translated_segment_texts"]),
                     speaker_groups,
-                    target_language,
-                    speaker_prompt,
+                    str(record["source_language"]),
+                    str(record["target_language"]),
+                    str(record["speaker_prompt"]),
                 )
-                tts_elapsed_ms = int(round((time.perf_counter() - t0) * 1000))
-                audio_length = int(audio_output.size)
+                record["speaker_groups"] = speaker_groups
+                record["speaker_refs"] = context["speaker_refs"]
+                record["allow_ref_text"] = bool(context["allow_ref_text"])
+                record["tts_pending_requests"] = pending_requests
+                if not pending_requests:
+                    record["tts_meta"] = {"status": "skipped", "reason": "No translated segments were available."}
+
+        tts_batch_items: list[tuple[int, dict[str, object]]] = []
+        for record_index, record in enumerate(records):
+            pending_requests = list(record["tts_pending_requests"])
+            for pending_request in pending_requests:
+                tts_batch_items.append((record_index, pending_request))
+
+        if tts_batch_items:
+            t0 = time.perf_counter()
+            global_batch_succeeded = False
+            try:
+                batch_outputs = self._run_tts_batch([request for _, request in tts_batch_items])
+                synthesized_by_record: dict[int, list[tuple[dict[str, object], np.ndarray, int]]] = {}
+                for record_index, _pending_request in tts_batch_items:
+                    synthesized_by_record.setdefault(record_index, [])
+                for (record_index, pending_request), (waveform, synth_sample_rate) in zip(
+                    tts_batch_items,
+                    batch_outputs,
+                    strict=True,
+                ):
+                    synthesized_by_record.setdefault(record_index, []).append(
+                        (pending_request["segment"], waveform, synth_sample_rate)
+                    )
+
+                for record_index, synthesized_segments in synthesized_by_record.items():
+                    record = records[record_index]
+                    audio_output, synthesized_sample_rate, tts_meta = self._render_time_aligned_output(
+                        audio_pcm=np.asarray(record["audio_pcm"], dtype=np.float32),
+                        sample_rate=int(record["sample_rate"]),
+                        diarized_segments=list(record["diarized_segments"]),
+                        synthesized_segments=synthesized_segments,
+                        speaker_groups=dict(record["speaker_groups"]),
+                        speaker_refs=dict(record["speaker_refs"]),
+                        allow_ref_text=bool(record["allow_ref_text"]),
+                    )
+                    record["audio_output"] = audio_output
+                    record["audio_length"] = int(audio_output.size)
+                    record["synthesized_sample_rate"] = synthesized_sample_rate
+                    record["tts_meta"] = tts_meta
+
+                elapsed_ms = int(round((time.perf_counter() - t0) * 1000))
+                for record_index in synthesized_by_record:
+                    records[record_index]["tts_elapsed_ms"] = elapsed_ms
+                global_batch_succeeded = True
+            except pb_utils.TritonModelException:
+                global_batch_succeeded = False
+
+            if not global_batch_succeeded:
+                for record in records:
+                    pending_requests = list(record["tts_pending_requests"])
+                    if not pending_requests:
+                        continue
+                    t0 = time.perf_counter()
+                    audio_output, synthesized_sample_rate, tts_meta = self._synthesize_time_aligned(
+                        np.asarray(record["audio_pcm"], dtype=np.float32),
+                        int(record["sample_rate"]),
+                        list(record["diarized_segments"]),
+                        list(record["translated_segment_texts"]),
+                        dict(record["speaker_groups"]),
+                        str(record["source_language"]),
+                        str(record["target_language"]),
+                        str(record["speaker_prompt"]),
+                    )
+                    record["tts_elapsed_ms"] = int(round((time.perf_counter() - t0) * 1000))
+                    record["audio_output"] = audio_output
+                    record["audio_length"] = int(audio_output.size)
+                    record["synthesized_sample_rate"] = synthesized_sample_rate
+                    record["tts_meta"] = tts_meta
+
+        responses = []
+        for record in records:
+            transcript = str(record["transcript"])
+            translated_text = str(record["translated_text"])
+            stt_elapsed_ms = int(record["stt_elapsed_ms"])
+            translation_elapsed_ms = int(record["translation_elapsed_ms"])
+            tts_elapsed_ms = int(record["tts_elapsed_ms"])
+            audio_output = np.asarray(record["audio_output"], dtype=np.float32)
+            audio_length = int(record["audio_length"])
+            synthesized_sample_rate = int(record["synthesized_sample_rate"])
+            diarized_segments = list(record["diarized_segments"])
+            tts_meta = dict(record["tts_meta"])
 
             responses.append(
                 pb_utils.InferenceResponse(

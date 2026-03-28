@@ -99,7 +99,9 @@ class TritonPythonModel:
         self._model = Qwen3TTSModel.from_pretrained(model_dir, **load_kwargs)
 
     def execute(self, requests):
-        responses = []
+        request_batches: list[tuple[int, int]] = []
+        flattened_items: list[dict[str, object]] = []
+
         for request in requests:
             texts = _tensor_as_bytes_list(request, "text", expected_count=-1)
             batch_count = len(texts)
@@ -114,10 +116,8 @@ class TritonPythonModel:
                 )
             ref_texts = _tensor_as_bytes_list(request, "ref_text", batch_count)
 
-            waveforms: list[np.ndarray] = []
-            sample_rates: list[int] = []
-            audio_lengths: list[int] = []
-
+            start_index = len(flattened_items)
+            request_batches.append((start_index, batch_count))
             for text, language, speaker_prompt, ref_audio, ref_text in zip(
                 texts,
                 languages,
@@ -126,53 +126,79 @@ class TritonPythonModel:
                 ref_texts,
                 strict=True,
             ):
-                normalized_language = language.strip().lower()
-                language_name = LANGUAGE_NAMES.get(normalized_language)
-                if language_name is None:
-                    raise pb_utils.TritonModelException(f"unsupported TTS language: {normalized_language}")
+                flattened_items.append(
+                    {
+                        "text": text,
+                        "language": language,
+                        "speaker_prompt": speaker_prompt,
+                        "ref_audio": ref_audio,
+                        "ref_text": ref_text,
+                    }
+                )
 
-                if ref_audio is not None:
-                    use_icl = bool(ref_text.strip())
-                    wavs, sample_rate = self._model.generate_voice_clone(
-                        text=text.strip(),
-                        language=language_name,
-                        ref_audio=(ref_audio, REF_AUDIO_SAMPLE_RATE),
-                        ref_text=ref_text.strip() if use_icl else None,
-                        x_vector_only_mode=not use_icl,
-                    )
-                else:
-                    speaker = DEFAULT_SPEAKERS.get(normalized_language)
-                    if speaker is None:
-                        raise pb_utils.TritonModelException(f"no default speaker for language: {normalized_language}")
-                    wavs, sample_rate = self._model.generate_custom_voice(
-                        text=text.strip(),
-                        language=language_name,
-                        speaker=speaker,
-                        instruct=speaker_prompt.strip() or None,
-                    )
+        waveforms: list[np.ndarray] = []
+        sample_rates: list[int] = []
+        audio_lengths: list[int] = []
 
-                if not wavs:
-                    raise pb_utils.TritonModelException("Qwen3-TTS returned an empty waveform list")
+        for item in flattened_items:
+            text = str(item["text"]).strip()
+            language = str(item["language"]).strip().lower()
+            speaker_prompt = str(item["speaker_prompt"])
+            ref_audio = item["ref_audio"]
+            ref_text = str(item["ref_text"])
 
-                waveform = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
-                if waveform.size == 0:
-                    raise pb_utils.TritonModelException("Qwen3-TTS returned an empty waveform")
+            language_name = LANGUAGE_NAMES.get(language)
+            if language_name is None:
+                raise pb_utils.TritonModelException(f"unsupported TTS language: {language}")
 
-                waveforms.append(waveform)
-                audio_lengths.append(int(waveform.size))
-                sample_rates.append(int(sample_rate))
+            if isinstance(ref_audio, np.ndarray):
+                use_icl = bool(ref_text.strip())
+                wavs, sample_rate = self._model.generate_voice_clone(
+                    text=text,
+                    language=language_name,
+                    ref_audio=(ref_audio, REF_AUDIO_SAMPLE_RATE),
+                    ref_text=ref_text.strip() if use_icl else None,
+                    x_vector_only_mode=not use_icl,
+                )
+            else:
+                speaker = DEFAULT_SPEAKERS.get(language)
+                if speaker is None:
+                    raise pb_utils.TritonModelException(f"no default speaker for language: {language}")
+                wavs, sample_rate = self._model.generate_custom_voice(
+                    text=text,
+                    language=language_name,
+                    speaker=speaker,
+                    instruct=speaker_prompt.strip() or None,
+                )
 
-            max_samples = max(audio_lengths)
+            if not wavs:
+                raise pb_utils.TritonModelException("Qwen3-TTS returned an empty waveform list")
+
+            waveform = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
+            if waveform.size == 0:
+                raise pb_utils.TritonModelException("Qwen3-TTS returned an empty waveform")
+
+            waveforms.append(waveform)
+            audio_lengths.append(int(waveform.size))
+            sample_rates.append(int(sample_rate))
+
+        responses = []
+        for start_index, batch_count in request_batches:
+            end_index = start_index + batch_count
+            request_waveforms = waveforms[start_index:end_index]
+            request_audio_lengths = audio_lengths[start_index:end_index]
+            request_sample_rates = sample_rates[start_index:end_index]
+            max_samples = max(request_audio_lengths)
             audio_batch = np.zeros((batch_count, max_samples), dtype=np.float32)
-            for index, waveform in enumerate(waveforms):
+            for index, waveform in enumerate(request_waveforms):
                 audio_batch[index, : waveform.size] = waveform
 
             responses.append(
                 pb_utils.InferenceResponse(
                     output_tensors=[
                         pb_utils.Tensor("audio_pcm", audio_batch),
-                        pb_utils.Tensor("audio_lengths", np.asarray(audio_lengths, dtype=np.int32)),
-                        pb_utils.Tensor("sample_rate", np.asarray(sample_rates, dtype=np.int32)),
+                        pb_utils.Tensor("audio_lengths", np.asarray(request_audio_lengths, dtype=np.int32)),
+                        pb_utils.Tensor("sample_rate", np.asarray(request_sample_rates, dtype=np.int32)),
                     ]
                 )
             )

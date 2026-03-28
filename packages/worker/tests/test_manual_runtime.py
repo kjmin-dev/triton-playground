@@ -45,6 +45,26 @@ class ManualRuntimeTest(unittest.TestCase):
             self.assertIn("Qwen3TTSModel", model_path.read_text(encoding="utf-8"))
             self.assertIn("qwen-tts>=0.1.0", requirements_path.read_text(encoding="utf-8"))
 
+    def test_materialize_translation_runtime_model_uses_variable_length_tensor_dims(self) -> None:
+        spec = get_model_spec("madlad400_3b_mt")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = Path(temp_dir) / "repository"
+
+            def fake_snapshot_download(model_spec, target_dir, cache_dir):
+                _ = (model_spec, cache_dir)
+                target_dir.mkdir(parents=True, exist_ok=True)
+                (target_dir / "config.json").write_text("{}", encoding="utf-8")
+                (target_dir / "model.safetensors").write_text("fake", encoding="utf-8")
+
+            with patch("pipeline.manual_runtime._snapshot_download", side_effect=fake_snapshot_download):
+                materialize_manual_runtime_model(output_root=output_root, spec=spec, cache_dir=None)
+
+            config_path = output_root / "madlad400_3b_mt" / "config.pbtxt"
+            config = config_path.read_text(encoding="utf-8")
+            self.assertIn('name: "text"', config)
+            self.assertIn("dims: [ -1 ]", config)
+
 
 if __name__ == "__main__":
     unittest.main()
