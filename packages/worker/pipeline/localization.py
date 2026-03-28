@@ -11,7 +11,13 @@ from pipeline.audio import AudioBuffer
 from pipeline.diarization import assign_speakers_to_transcribed
 from pipeline.stt import SttAnalysis, TranscribedSegment, _slice_audio, analyze_stt
 from pipeline.translation import TritonTranslationClient, normalize_pipeline_language
-from pipeline.tts import SynthesizedAudio, TritonTtsClient, encode_wav_preview, validate_tts_language
+from pipeline.tts import (
+    SynthesizedAudio,
+    TritonTtsClient,
+    TtsSynthesisRequest,
+    encode_wav_preview,
+    validate_tts_language,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,27 +128,58 @@ def _synthesize_time_aligned(
     for sid in speaker_groups:
         speaker_refs[sid] = _select_reference_segment(audio, diarized_segments, speaker_id=sid)
 
-    segments_synthesized = 0
+    pending_segments: list[tuple[TranscribedSegment, TtsSynthesisRequest]] = []
     for seg in diarized_segments:
         if not seg.text.strip():
             continue
 
         sid = seg.speaker_id or "speaker_0"
         ref = speaker_refs.get(sid)
-
-        try:
-            synth = tts_client.synthesize(
-                seg.text,
-                language=tts_language,
-                speaker_prompt=speaker_prompt,
-                ref_audio=ref[0] if ref else None,
-                ref_audio_sample_rate=ref[2] if ref else 16000,
-                ref_text=ref[1] if ref else None,
+        pending_segments.append(
+            (
+                seg,
+                TtsSynthesisRequest(
+                    text=seg.text,
+                    language=tts_language,
+                    speaker_prompt=speaker_prompt,
+                    ref_audio=ref[0] if ref else None,
+                    ref_audio_sample_rate=ref[2] if ref else 16000,
+                    ref_text=ref[1] if ref else None,
+                ),
             )
-        except Exception:
-            logger.warning("TTS failed for segment %d-%d ms, filling silence", seg.start_ms, seg.end_ms, exc_info=True)
-            continue
+        )
 
+    synthesized_segments: list[tuple[TranscribedSegment, SynthesizedAudio]] = []
+    if pending_segments and hasattr(tts_client, "synthesize_many"):
+        try:
+            batch_outputs = tts_client.synthesize_many([request for _, request in pending_segments])
+            synthesized_segments = [
+                (segment, synthesized)
+                for (segment, _), synthesized in zip(pending_segments, batch_outputs, strict=True)
+            ]
+        except Exception:
+            logger.warning("Batched TTS failed, falling back to per-segment synthesis", exc_info=True)
+
+    if not synthesized_segments:
+        for seg, request in pending_segments:
+            try:
+                synth = tts_client.synthesize(
+                    request.text,
+                    language=request.language,
+                    speaker_prompt=request.speaker_prompt,
+                    ref_audio=request.ref_audio,
+                    ref_audio_sample_rate=request.ref_audio_sample_rate,
+                    ref_text=request.ref_text,
+                )
+            except Exception:
+                logger.warning(
+                    "TTS failed for segment %d-%d ms, filling silence", seg.start_ms, seg.end_ms, exc_info=True
+                )
+                continue
+            synthesized_segments.append((seg, synth))
+
+    segments_synthesized = 0
+    for seg, synth in synthesized_segments:
         if sample_rate is None:
             sample_rate = synth.sample_rate
 

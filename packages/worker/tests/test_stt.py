@@ -29,18 +29,26 @@ class SttAnalysisTest(unittest.TestCase):
 
         class FakeWhisperClient:
             def __init__(self) -> None:
-                self.calls: list[tuple[int, int | None, str, str | None]] = []
+                self.calls: list[tuple[tuple[int, ...], tuple[int | None, ...], str, str | None]] = []
 
-            def transcribe(
+            def transcribe_many(
                 self,
-                segment_audio: AudioBuffer,
+                segment_audios: list[AudioBuffer],
                 *,
                 language: str | None,
                 task: str,
                 prompt: str | None = None,
-            ) -> str:
-                self.calls.append((len(segment_audio.samples), segment_audio.sample_rate, task, language))
-                return "hello world"
+            ) -> list[str]:
+                _ = prompt
+                self.calls.append(
+                    (
+                        tuple(len(segment_audio.samples) for segment_audio in segment_audios),
+                        tuple(segment_audio.sample_rate for segment_audio in segment_audios),
+                        task,
+                        language,
+                    )
+                )
+                return ["hello world" for _ in segment_audios]
 
         whisper = FakeWhisperClient()
         analysis = analyze_stt(
@@ -60,7 +68,7 @@ class SttAnalysisTest(unittest.TestCase):
         self.assertEqual(analysis.transcript, "hello world")
         self.assertEqual(len(analysis.segments), 1)
         self.assertEqual(analysis.segments[0].text, "hello world")
-        self.assertEqual(whisper.calls, [(4096, 16000, "transcribe", "en")])
+        self.assertEqual(whisper.calls, [((4096,), (16000,), "transcribe", "en")])
 
     def test_analyze_stt_returns_empty_transcript_when_vad_finds_no_speech(self) -> None:
         audio = AudioBuffer(samples=np.zeros(512 * 4, dtype=np.float32), sample_rate=16000)

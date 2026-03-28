@@ -58,7 +58,7 @@ class PrepareModelsTest(unittest.TestCase):
         self.assertFalse(whisper["installed"])
         self.assertEqual(whisper["repository_model_name"], "whisper_large_v3_turbo")
         self.assertEqual(whisper["triton_backend"], "python")
-        self.assertIn("audio_pcm: FP32[1, samples]", whisper["triton_inputs"][0])
+        self.assertIn("audio_pcm: FP32[segments, padded_samples]", whisper["triton_inputs"][0])
         self.assertIn("manual download", whisper["reason"])
 
     def test_catalog_manifest_records_localization_contracts_without_installing_models(self) -> None:
@@ -78,7 +78,7 @@ class PrepareModelsTest(unittest.TestCase):
 
         self.assertFalse(tts["installed"])
         self.assertEqual(tts["repository_model_name"], "qwen3_tts_0_6b")
-        self.assertIn("audio_pcm: FP32[1, samples]", tts["triton_outputs"][0])
+        self.assertIn("audio_pcm: FP32[segments, padded_samples]", tts["triton_outputs"][0])
 
     def test_manual_stub_root_writes_translation_and_tts_templates(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

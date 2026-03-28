@@ -34,20 +34,14 @@ class LocalizationPipelineTest(unittest.TestCase):
                 return "annyeong haseyo"
 
         class FakeTtsClient:
-            def synthesize(
-                self,
-                text: str,
-                *,
-                language: str,
-                speaker_prompt: str | None = None,
-                ref_audio: np.ndarray | None = None,
-                ref_audio_sample_rate: int = 16000,
-                ref_text: str | None = None,
-            ) -> SynthesizedAudio:
-                self.call = (text, language, speaker_prompt)
-                self.ref_audio = ref_audio
-                self.ref_text = ref_text
-                return SynthesizedAudio(sample_rate=24000, samples=np.linspace(-0.2, 0.2, num=480, dtype=np.float32))
+            def synthesize_many(self, requests) -> list[SynthesizedAudio]:
+                self.call = (requests[0].text, requests[0].language, requests[0].speaker_prompt)
+                self.ref_audio = requests[0].ref_audio
+                self.ref_text = requests[0].ref_text
+                return [
+                    SynthesizedAudio(sample_rate=24000, samples=np.linspace(-0.2, 0.2, num=480, dtype=np.float32))
+                    for _ in requests
+                ]
 
         translation = FakeTranslationClient()
         tts = FakeTtsClient()

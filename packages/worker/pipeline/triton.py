@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,6 +16,46 @@ if TYPE_CHECKING:
 
 class TritonUnavailableError(RuntimeError):
     pass
+
+
+def _readiness_cache_ttl_seconds() -> float:
+    raw = os.getenv("TRITON_READINESS_CACHE_TTL_SECONDS", "5")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 5.0
+
+
+def init_fast_readiness_cache(owner: object) -> None:
+    owner._fast_readiness_cache_value = None
+    owner._fast_readiness_cache_deadline = 0.0
+    owner._fast_readiness_cache_ttl_seconds = _readiness_cache_ttl_seconds()
+
+
+def invalidate_fast_readiness_cache(owner: object) -> None:
+    owner._fast_readiness_cache_value = None
+    owner._fast_readiness_cache_deadline = 0.0
+
+
+def get_fast_readiness(
+    owner: object,
+    client: object,
+    *,
+    url: str,
+    model_name: str,
+    refresh: bool = False,
+) -> TritonReadiness:
+    now = time.monotonic()
+    cached = getattr(owner, "_fast_readiness_cache_value", None)
+    deadline = float(getattr(owner, "_fast_readiness_cache_deadline", 0.0))
+    if not refresh and cached is not None and now < deadline:
+        return cached
+
+    readiness = check_readiness(client, url, model_name, include_repository_index=False)
+    ttl_seconds = float(getattr(owner, "_fast_readiness_cache_ttl_seconds", _readiness_cache_ttl_seconds()))
+    owner._fast_readiness_cache_value = readiness
+    owner._fast_readiness_cache_deadline = now + ttl_seconds
+    return readiness
 
 
 def describe_triton_error(*, url: str, action: str, exc: Exception) -> str:
@@ -118,13 +160,19 @@ def _model_index_entry_state(entry: object) -> str | None:
     return str(value) if value is not None else None
 
 
-def check_readiness(client: object, url: str, model_name: str) -> TritonReadiness:
+def check_readiness(
+    client: object,
+    url: str,
+    model_name: str,
+    *,
+    include_repository_index: bool = True,
+) -> TritonReadiness:
     """Shared readiness check used by all Triton client classes."""
     try:
         model_present: bool | None = None
         model_state: str | None = None
         get_model_repository_index = getattr(client, "get_model_repository_index", None)
-        if callable(get_model_repository_index):
+        if include_repository_index and callable(get_model_repository_index):
             try:
                 model_index = get_model_repository_index()
             except Exception:
@@ -265,6 +313,7 @@ class TritonVadClient:
         self._grpcclient = grpcclient
         self._url = url
         self._model_name = model_name
+        init_fast_readiness_cache(self)
 
         try:
             self._client = grpcclient.InferenceServerClient(url=url, verbose=False)
@@ -273,11 +322,13 @@ class TritonVadClient:
                 describe_triton_error(url=url, action="Creating the Triton client", exc=exc)
             ) from exc
 
-    def readiness(self) -> TritonReadiness:
-        return check_readiness(self._client, self._url, self._model_name)
+    def readiness(self, *, refresh: bool = False, detailed: bool = True) -> TritonReadiness:
+        if detailed:
+            return check_readiness(self._client, self._url, self._model_name)
+        return get_fast_readiness(self, self._client, url=self._url, model_name=self._model_name, refresh=refresh)
 
     def score_windows(self, windows: np.ndarray) -> list[float]:
-        readiness = self.readiness()
+        readiness = self.readiness(detailed=False)
         if not readiness.ready:
             raise TritonUnavailableError(readiness.summary)
 
@@ -310,6 +361,7 @@ class TritonVadClient:
                 probabilities.append(float(response.as_numpy("output").reshape(-1)[0]))
                 state = response.as_numpy("stateN").astype(np.float32)
         except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
+            invalidate_fast_readiness_cache(self)
             raise TritonUnavailableError(
                 describe_triton_error(url=self._url, action="Running Triton VAD inference", exc=exc)
             ) from exc
@@ -333,6 +385,7 @@ class TritonVadStreamingClient:
         self._grpcclient = grpcclient
         self._url = url
         self._model_name = model_name
+        init_fast_readiness_cache(self)
 
         try:
             self._client = grpcclient.InferenceServerClient(url=url, verbose=False)
@@ -341,11 +394,13 @@ class TritonVadStreamingClient:
                 describe_triton_error(url=url, action="Creating the Triton client", exc=exc)
             ) from exc
 
-    def readiness(self) -> TritonReadiness:
-        return check_readiness(self._client, self._url, self._model_name)
+    def readiness(self, *, refresh: bool = False, detailed: bool = True) -> TritonReadiness:
+        if detailed:
+            return check_readiness(self._client, self._url, self._model_name)
+        return get_fast_readiness(self, self._client, url=self._url, model_name=self._model_name, refresh=refresh)
 
     def score_windows(self, windows: np.ndarray) -> list[float]:
-        readiness = self.readiness()
+        readiness = self.readiness(detailed=False)
         if not readiness.ready:
             raise TritonUnavailableError(readiness.summary)
 
@@ -370,6 +425,7 @@ class TritonVadStreamingClient:
 
             return response.as_numpy("probabilities").astype(float).tolist()
         except Exception as exc:  # pragma: no cover
+            invalidate_fast_readiness_cache(self)
             raise TritonUnavailableError(
                 describe_triton_error(url=self._url, action="Running Triton streaming VAD inference", exc=exc)
             ) from exc

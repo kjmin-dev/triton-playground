@@ -173,7 +173,7 @@ def _check_readiness():
     )
 
     try:
-        triton_readiness = _cached_vad_client(_triton_grpc_url()).readiness()
+        triton_readiness = _cached_vad_client(_triton_grpc_url()).readiness(refresh=True)
     except TritonUnavailableError as exc:
         triton_readiness = TritonReadiness.from_error(
             server_url=_triton_grpc_url(),

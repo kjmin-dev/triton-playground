@@ -11,13 +11,21 @@ from pipeline.stt_contract import (
     SUPPORTED_WHISPER_LANGUAGES,
     SUPPORTED_WHISPER_TASKS,
     WHISPER_AUDIO_INPUT,
+    WHISPER_AUDIO_LENGTHS_INPUT,
     WHISPER_LANGUAGE_INPUT,
     WHISPER_PROMPT_INPUT,
     WHISPER_SAMPLE_RATE_INPUT,
     WHISPER_TASK_INPUT,
     WHISPER_TRANSCRIPT_OUTPUT,
 )
-from pipeline.triton import TritonUnavailableError, check_readiness, describe_triton_error
+from pipeline.triton import (
+    TritonUnavailableError,
+    check_readiness,
+    describe_triton_error,
+    get_fast_readiness,
+    init_fast_readiness_cache,
+    invalidate_fast_readiness_cache,
+)
 from pipeline.vad import analyze_vad
 
 
@@ -92,6 +100,11 @@ def _slice_audio(audio: AudioBuffer, start_ms: int, end_ms: int) -> AudioBuffer:
 
 
 def _decode_transcript_output(transcript_tensor: np.ndarray | None) -> str:
+    outputs = _decode_transcript_outputs(transcript_tensor)
+    return outputs[0] if outputs else ""
+
+
+def _decode_transcript_outputs(transcript_tensor: np.ndarray | None) -> list[str]:
     if transcript_tensor is None:
         raise TritonUnavailableError(
             "Whisper Triton inference succeeded but did not return the configured transcript output tensor."
@@ -99,7 +112,7 @@ def _decode_transcript_output(transcript_tensor: np.ndarray | None) -> str:
 
     flattened = transcript_tensor.reshape(-1)
     if flattened.size == 0:
-        return ""
+        return []
 
     fragments: list[str] = []
     for item in flattened:
@@ -111,7 +124,7 @@ def _decode_transcript_output(transcript_tensor: np.ndarray | None) -> str:
         else:
             fragments.append(str(scalar))
 
-    return " ".join(fragment.strip() for fragment in fragments if fragment.strip())
+    return [fragment.strip() for fragment in fragments]
 
 
 class TritonWhisperClient:
@@ -136,11 +149,13 @@ class TritonWhisperClient:
         self._url = url
         self._model_name = model_name
         self._audio_input_name = audio_input_name
+        self._audio_lengths_input_name = WHISPER_AUDIO_LENGTHS_INPUT
         self._sample_rate_input_name = sample_rate_input_name
         self._task_input_name = task_input_name
         self._language_input_name = language_input_name
         self._prompt_input_name = prompt_input_name
         self._transcript_output_name = transcript_output_name
+        init_fast_readiness_cache(self)
 
         try:
             self._client = grpcclient.InferenceServerClient(url=url, verbose=False)
@@ -149,8 +164,10 @@ class TritonWhisperClient:
                 describe_triton_error(url=url, action="Creating the Triton client", exc=exc)
             ) from exc
 
-    def readiness(self) -> TritonReadiness:
-        return check_readiness(self._client, self._url, self._model_name)
+    def readiness(self, *, refresh: bool = False, detailed: bool = True) -> TritonReadiness:
+        if detailed:
+            return check_readiness(self._client, self._url, self._model_name)
+        return get_fast_readiness(self, self._client, url=self._url, model_name=self._model_name, refresh=refresh)
 
     def transcribe(
         self,
@@ -160,34 +177,80 @@ class TritonWhisperClient:
         task: str,
         prompt: str | None = None,
     ) -> str:
-        readiness = self.readiness()
+        transcripts = self.transcribe_many(
+            [audio],
+            language=language,
+            task=task,
+            prompt=prompt,
+        )
+        return transcripts[0] if transcripts else ""
+
+    def transcribe_many(
+        self,
+        audio_segments: list[AudioBuffer],
+        *,
+        language: str | None,
+        task: str,
+        prompt: str | None = None,
+    ) -> list[str]:
+        if not audio_segments:
+            return []
+
+        readiness = self.readiness(detailed=False)
         if not readiness.ready:
             raise TritonUnavailableError(readiness.summary)
+
+        max_samples = max(len(audio.samples) for audio in audio_segments)
+        audio_batch = np.zeros((len(audio_segments), max_samples), dtype=np.float32)
+        audio_lengths = np.zeros(len(audio_segments), dtype=np.int32)
+        sample_rates = np.zeros(len(audio_segments), dtype=np.int32)
+
+        for index, segment_audio in enumerate(audio_segments):
+            sample_count = len(segment_audio.samples)
+            audio_batch[index, :sample_count] = segment_audio.samples.astype(np.float32)
+            audio_lengths[index] = sample_count
+            sample_rates[index] = segment_audio.sample_rate
+
+        repeated_task = np.asarray([task] * len(audio_segments), dtype=object)
+        repeated_language = np.asarray([(language or "")] * len(audio_segments), dtype=object)
+        repeated_prompt = np.asarray([(prompt or "")] * len(audio_segments), dtype=object)
 
         try:
             audio_input = self._grpcclient.InferInput(
                 self._audio_input_name,
-                [1, len(audio.samples)],
+                list(audio_batch.shape),
                 "FP32",
             )
-            audio_input.set_data_from_numpy(audio.samples.reshape(1, -1).astype(np.float32))
+            audio_input.set_data_from_numpy(audio_batch)
 
-            sample_rate_input = self._grpcclient.InferInput(self._sample_rate_input_name, [1], "INT32")
-            sample_rate_input.set_data_from_numpy(np.asarray([audio.sample_rate], dtype=np.int32))
+            audio_lengths_input = self._grpcclient.InferInput(
+                self._audio_lengths_input_name,
+                [len(audio_segments)],
+                "INT32",
+            )
+            audio_lengths_input.set_data_from_numpy(audio_lengths)
 
-            task_input = self._grpcclient.InferInput(self._task_input_name, [1], "BYTES")
-            task_input.set_data_from_numpy(np.asarray([task], dtype=object))
+            sample_rate_input = self._grpcclient.InferInput(
+                self._sample_rate_input_name,
+                [len(audio_segments)],
+                "INT32",
+            )
+            sample_rate_input.set_data_from_numpy(sample_rates)
 
-            language_input = self._grpcclient.InferInput(self._language_input_name, [1], "BYTES")
-            language_input.set_data_from_numpy(np.asarray([language or ""], dtype=object))
+            task_input = self._grpcclient.InferInput(self._task_input_name, [len(audio_segments)], "BYTES")
+            task_input.set_data_from_numpy(repeated_task)
 
-            prompt_input = self._grpcclient.InferInput(self._prompt_input_name, [1], "BYTES")
-            prompt_input.set_data_from_numpy(np.asarray([prompt or ""], dtype=object))
+            language_input = self._grpcclient.InferInput(self._language_input_name, [len(audio_segments)], "BYTES")
+            language_input.set_data_from_numpy(repeated_language)
+
+            prompt_input = self._grpcclient.InferInput(self._prompt_input_name, [len(audio_segments)], "BYTES")
+            prompt_input.set_data_from_numpy(repeated_prompt)
 
             result = self._client.infer(
                 self._model_name,
                 [
                     audio_input,
+                    audio_lengths_input,
                     sample_rate_input,
                     task_input,
                     language_input,
@@ -196,11 +259,17 @@ class TritonWhisperClient:
                 outputs=[self._grpcclient.InferRequestedOutput(self._transcript_output_name)],
             )
         except Exception as exc:  # pragma: no cover - transport failures depend on the runtime
+            invalidate_fast_readiness_cache(self)
             raise TritonUnavailableError(
                 describe_triton_error(url=self._url, action="Running Whisper inference", exc=exc)
             ) from exc
 
-        return _decode_transcript_output(result.as_numpy(self._transcript_output_name))
+        transcripts = _decode_transcript_outputs(result.as_numpy(self._transcript_output_name))
+        if len(transcripts) != len(audio_segments):
+            raise TritonUnavailableError(
+                f"Whisper Triton inference returned {len(transcripts)} transcripts for {len(audio_segments)} segments."
+            )
+        return transcripts
 
 
 def analyze_stt(
@@ -230,14 +299,31 @@ def analyze_stt(
         window_samples=window_samples,
     )
 
+    sliced_segments = [_slice_audio(audio, segment.start_ms, segment.end_ms) for segment in vad_analysis.segments]
+
+    if hasattr(stt_client, "transcribe_many"):
+        texts = [
+            transcript.strip()
+            for transcript in stt_client.transcribe_many(
+                sliced_segments,
+                language=normalized_language,
+                task=normalized_task,
+                prompt=prompt,
+            )
+        ]
+    else:
+        texts = [
+            stt_client.transcribe(
+                segment_audio,
+                language=normalized_language,
+                task=normalized_task,
+                prompt=prompt,
+            ).strip()
+            for segment_audio in sliced_segments
+        ]
+
     segments: list[TranscribedSegment] = []
-    for segment in vad_analysis.segments:
-        text = stt_client.transcribe(
-            _slice_audio(audio, segment.start_ms, segment.end_ms),
-            language=normalized_language,
-            task=normalized_task,
-            prompt=prompt,
-        ).strip()
+    for segment, text in zip(vad_analysis.segments, texts, strict=True):
         segments.append(
             TranscribedSegment(
                 start_ms=segment.start_ms,
