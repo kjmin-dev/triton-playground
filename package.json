@@ -12,6 +12,7 @@
     "build:web": "moon run web:build",
     "prepare:models": "moon run worker:prepare-models --",
     "prepare:localize": "moon run worker:prepare-localize",
+    "docker:build": "docker build -t triton-playground-dev:localize --build-arg TRITON_RUNTIME_PROFILE=localize -f packages/triton/Dockerfile .",
     "download:weights": "bash scripts/download-weights.sh",
     "prepare:manual-stubs": "moon run worker:prepare-manual-stubs",
     "lint": "moon run :lint web:typecheck",
