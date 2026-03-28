@@ -17,7 +17,6 @@ import {
 import * as React from 'react';
 
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { getWorkerBaseUrl } from '@/lib/runtime-config';
 
@@ -364,10 +363,6 @@ function buildTtsDirection(options: {
   return [deliveryPrompt, tonePrompt, timbrePrompt, customPrompt].filter(Boolean).join('; ');
 }
 
-function voiceModeLabel(mode: TtsVoiceMode) {
-  return mode === 'reference_clone' ? 'Reference Voice' : 'Preset Voice';
-}
-
 async function downloadSubtitle(fmt: string, loc: LocalizeResponse, workerBaseUrl: string) {
   try {
     const res = await fetch(`${workerBaseUrl}/api/subtitles/${fmt}`, {
@@ -420,7 +415,6 @@ function Home() {
   const [ttsTimbreHintId, setTtsTimbreHintId] = React.useState<(typeof TTS_TIMBRE_HINTS)[number]['id']>('auto');
   const [ttsActorId, setTtsActorId] = React.useState('');
   const [ttsReferenceFile, setTtsReferenceFile] = React.useState<File | null>(null);
-  const [ttsPreviewVariantIdByActorId, setTtsPreviewVariantIdByActorId] = React.useState<Record<string, string>>({});
   const [ttsPreviewBusyKey, setTtsPreviewBusyKey] = React.useState<string | null>(null);
   const [ttsPreviewError, setTtsPreviewError] = React.useState<string | null>(null);
   const [ttsPreviewAudioByKey, setTtsPreviewAudioByKey] = React.useState<Record<string, string>>({});
@@ -452,17 +446,10 @@ function Home() {
   const ttsAudioSrc = buildAudioDataUrl(ttsRes?.content_type, ttsRes?.audio_base64);
   const scores = vad?.window_scores.slice(0, SCORE_LIMIT) ?? [];
   const speechWins = vad && thrOk ? vad.window_scores.filter((s) => s >= thr).length : 0;
-  const ttsActors = React.useMemo(
-    () => ttsCatalog?.actors.filter((actor) => actor.language === ttsLanguage) ?? [],
-    [ttsCatalog, ttsLanguage]
-  );
+  const ttsActors = React.useMemo(() => ttsCatalog?.actors ?? [], [ttsCatalog]);
   const selectedTtsActor = React.useMemo(
-    () => ttsActors.find((actor) => actor.actor_id === ttsActorId) ?? ttsActors[0] ?? null,
+    () => ttsActors.find((actor) => actor.actor_id === ttsActorId) ?? null,
     [ttsActorId, ttsActors]
-  );
-  const selectedTtsVoiceModeInfo = React.useMemo(
-    () => ttsCatalog?.voice_modes.find((item) => item.mode === ttsVoiceMode) ?? null,
-    [ttsCatalog, ttsVoiceMode]
   );
   const presetVoiceAvailable = Boolean(ttsCatalog?.supports_preset_actors);
   const isReferenceVoiceMode = ttsVoiceMode === 'reference_clone';
@@ -547,30 +534,15 @@ function Home() {
 
   React.useEffect(() => {
     if (ttsActors.length === 0) return;
-    if (ttsActors.some((actor) => actor.actor_id === ttsActorId)) return;
+    if (selectedTtsActor && selectedTtsActor.language === ttsLanguage) return;
 
-    const defaultActorId = ttsCatalog?.default_actor_id_by_language[ttsLanguage] ?? ttsActors[0]?.actor_id ?? '';
+    const defaultActorId =
+      ttsCatalog?.default_actor_id_by_language[ttsLanguage] ??
+      ttsActors.find((actor) => actor.language === ttsLanguage)?.actor_id ??
+      ttsActors[0]?.actor_id ??
+      '';
     setTtsActorId(defaultActorId);
-  }, [ttsActorId, ttsActors, ttsCatalog, ttsLanguage]);
-
-  React.useEffect(() => {
-    if (!ttsCatalog) return;
-
-    setTtsPreviewVariantIdByActorId((prev) => {
-      let next = prev;
-
-      for (const actor of ttsCatalog.actors) {
-        const selectedPreviewId = prev[actor.actor_id];
-        const hasSelectedVariant = actor.preview_variants.some((preview) => preview.preview_id === selectedPreviewId);
-        if (hasSelectedVariant) continue;
-
-        if (next === prev) next = { ...prev };
-        next[actor.actor_id] = actor.default_preview_id;
-      }
-
-      return next;
-    });
-  }, [ttsCatalog]);
+  }, [selectedTtsActor, ttsActors, ttsCatalog, ttsLanguage]);
 
   async function runPipeline(route: Exclude<DemoMode, 'tts'>) {
     if (!file) {
@@ -641,8 +613,8 @@ function Home() {
         setError(ttsCatalog?.preset_actor_message ?? 'Preset voice mode is unavailable in the current runtime.');
         return;
       }
-      if (!selectedTtsActor) {
-        setError('Select a preset voice before generating TTS.');
+      if (!selectedTtsActor || selectedTtsActor.language !== ttsLanguage) {
+        setError('Select a preset voice that matches the current output language.');
         return;
       }
     }
@@ -695,7 +667,7 @@ function Home() {
     }
     const actor = ttsCatalog?.actors.find((item) => item.actor_id === actorId);
     if (!actor) return;
-    const previewVariant = resolveTtsPreviewVariant(actor, ttsPreviewVariantIdByActorId[actor.actor_id]);
+    const previewVariant = resolveTtsPreviewVariant(actor, null);
     if (!previewVariant) return;
     const previewKey = ttsPreviewCacheKey(actor.actor_id, previewVariant.preview_id);
 
@@ -934,291 +906,234 @@ function Home() {
             </div>
           </>
         ) : (
-          <div className='space-y-4 rounded-xl border border-slate-200 bg-white/80 p-5 backdrop-blur'>
-            <div className='grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.9fr)]'>
-              <div className='space-y-4'>
-                <div className='grid gap-4 sm:grid-cols-2'>
-                  <label className='space-y-2'>
-                    <span className='flex items-center gap-2 text-sm font-medium text-slate-700'>
-                      <Globe2 className='h-3.5 w-3.5 text-slate-400' />
-                      Language
-                    </span>
-                    <select
-                      className='w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm'
-                      disabled={busy !== null}
-                      onChange={(e) => setTtsLanguage(e.target.value)}
-                      value={ttsLanguage}
-                    >
-                      {TTS_LANGUAGE_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+          <div className='space-y-5 rounded-xl border border-slate-200 bg-white/80 p-5 backdrop-blur'>
+            <div className='grid gap-4 sm:grid-cols-2'>
+              <label className='space-y-2'>
+                <span className='flex items-center gap-2 text-sm font-medium text-slate-700'>
+                  <Globe2 className='h-3.5 w-3.5 text-slate-400' />
+                  Language
+                </span>
+                <select
+                  className='w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm'
+                  disabled={busy !== null}
+                  onChange={(e) => setTtsLanguage(e.target.value)}
+                  value={ttsLanguage}
+                >
+                  {TTS_LANGUAGE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
-                  <div className='space-y-2'>
-                    <span className='flex items-center gap-2 text-sm font-medium text-slate-700'>
-                      <Bot className='h-3.5 w-3.5 text-slate-400' />
-                      Voice Source
-                    </span>
-                    <div className='grid gap-2'>
-                      {(
-                        ttsCatalog?.voice_modes ?? [
-                          {
-                            available: true,
-                            description: 'Upload a WAV reference clip and clone its voice with the Base checkpoint.',
-                            label: 'Reference Voice',
-                            mode: 'reference_clone' as TtsVoiceMode,
-                          },
-                          {
-                            available: presetVoiceAvailable,
-                            description: presetVoiceAvailable
-                              ? 'Use built-in preset voices from the optional CustomVoice checkpoint.'
-                              : 'Preset voices require the optional CustomVoice checkpoint.',
-                            label: 'Preset Voice Library',
-                            mode: 'preset_voice' as TtsVoiceMode,
-                          },
-                        ]
-                      ).map((voiceMode) => {
-                        const active = ttsVoiceMode === voiceMode.mode;
-                        return (
-                          <button
-                            className={`rounded-xl border px-3 py-3 text-left transition ${
-                              active
-                                ? 'border-cyan-400 bg-cyan-50'
-                                : voiceMode.available
-                                  ? 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
-                                  : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400'
+              <div className='space-y-2'>
+                <span className='flex items-center gap-2 text-sm font-medium text-slate-700'>
+                  <Bot className='h-3.5 w-3.5 text-slate-400' />
+                  Voice Source
+                </span>
+                <div className='grid gap-2'>
+                  {(
+                    ttsCatalog?.voice_modes ?? [
+                      {
+                        available: true,
+                        description: 'Upload a WAV reference clip and clone its voice with the Base checkpoint.',
+                        label: 'Reference Voice',
+                        mode: 'reference_clone' as TtsVoiceMode,
+                      },
+                      {
+                        available: presetVoiceAvailable,
+                        description: presetVoiceAvailable
+                          ? 'Use built-in preset voices from the optional CustomVoice checkpoint.'
+                          : 'Preset voices require the optional CustomVoice checkpoint.',
+                        label: 'Preset Voice Library',
+                        mode: 'preset_voice' as TtsVoiceMode,
+                      },
+                    ]
+                  ).map((voiceMode) => {
+                    const active = ttsVoiceMode === voiceMode.mode;
+                    return (
+                      <button
+                        className={`rounded-xl border px-3 py-3 text-left transition ${
+                          active
+                            ? 'border-cyan-400 bg-cyan-50'
+                            : voiceMode.available
+                              ? 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
+                              : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400'
+                        }`}
+                        disabled={!voiceMode.available || busy !== null}
+                        key={voiceMode.mode}
+                        onClick={() => setTtsVoiceMode(voiceMode.mode)}
+                        type='button'
+                      >
+                        <div className='flex items-center justify-between gap-2'>
+                          <span className='text-sm font-semibold text-slate-950'>{voiceMode.label}</span>
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] ${
+                              voiceMode.available ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
                             }`}
-                            disabled={!voiceMode.available || busy !== null}
-                            key={voiceMode.mode}
-                            onClick={() => setTtsVoiceMode(voiceMode.mode)}
-                            type='button'
                           >
-                            <div className='flex items-center justify-between gap-2'>
-                              <span className='text-sm font-semibold text-slate-950'>{voiceMode.label}</span>
-                              <span
-                                className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] ${
-                                  voiceMode.available ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
-                                }`}
-                              >
-                                {voiceMode.available ? 'Ready' : 'Unavailable'}
-                              </span>
-                            </div>
-                            <p className='mt-1 text-xs leading-5 text-slate-500'>{voiceMode.description}</p>
-                          </button>
-                        );
-                      })}
+                            {voiceMode.available ? 'Ready' : 'Unavailable'}
+                          </span>
+                        </div>
+                        <p className='mt-1 text-xs leading-5 text-slate-500'>{voiceMode.description}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {isReferenceVoiceMode && (
+              <label className='space-y-2'>
+                <span className='flex items-center gap-2 text-sm font-medium text-slate-700'>
+                  <Upload className='h-3.5 w-3.5 text-slate-400' />
+                  Reference Voice
+                </span>
+                <div className='rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3 py-3'>
+                  <div className='flex items-center justify-between gap-3'>
+                    <div className='min-w-0'>
+                      <p className='truncate text-sm font-medium text-slate-900'>
+                        {ttsReferenceFile ? ttsReferenceFile.name : 'Required WAV reference audio'}
+                      </p>
+                      <p className='text-xs text-slate-500'>
+                        {ttsReferenceFile
+                          ? fmtBytes(ttsReferenceFile.size)
+                          : 'Upload a clean sample to clone the source voice'}
+                      </p>
+                    </div>
+                    <div className='flex items-center gap-2'>
+                      {ttsReferenceFile && (
+                        <Button onClick={() => setTtsReferenceFile(null)} size='sm' type='button' variant='ghost'>
+                          Clear
+                        </Button>
+                      )}
+                      <label className='cursor-pointer'>
+                        <span className='inline-flex h-7 items-center justify-center rounded-[min(var(--radius-md),12px)] border border-border bg-background px-2.5 text-[0.8rem] font-medium text-foreground transition hover:bg-muted hover:text-foreground'>
+                          {ttsReferenceFile ? 'Replace' : 'Upload'}
+                        </span>
+                        <input
+                          accept='.wav,audio/wav'
+                          className='sr-only'
+                          disabled={busy !== null}
+                          onChange={(e) => setTtsReferenceFile(e.target.files?.[0] ?? null)}
+                          type='file'
+                        />
+                      </label>
                     </div>
                   </div>
+                  {ttsReferenceAudioUrl && <audio className='mt-3 w-full' controls src={ttsReferenceAudioUrl} />}
                 </div>
+              </label>
+            )}
 
-                {isReferenceVoiceMode && (
-                  <label className='space-y-2'>
-                    <span className='flex items-center gap-2 text-sm font-medium text-slate-700'>
-                      <Upload className='h-3.5 w-3.5 text-slate-400' />
-                      Reference Voice
-                    </span>
-                    <div className='rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3 py-3'>
-                      <div className='flex items-center justify-between gap-3'>
-                        <div className='min-w-0'>
-                          <p className='truncate text-sm font-medium text-slate-900'>
-                            {ttsReferenceFile ? ttsReferenceFile.name : 'Required WAV reference audio'}
-                          </p>
-                          <p className='text-xs text-slate-500'>
-                            {ttsReferenceFile
-                              ? fmtBytes(ttsReferenceFile.size)
-                              : 'Upload a clean sample to clone the source voice'}
-                          </p>
-                        </div>
-                        <div className='flex items-center gap-2'>
-                          {ttsReferenceFile && (
-                            <Button onClick={() => setTtsReferenceFile(null)} size='sm' type='button' variant='ghost'>
-                              Clear
-                            </Button>
-                          )}
-                          <label className='cursor-pointer'>
-                            <span className='inline-flex h-7 items-center justify-center rounded-[min(var(--radius-md),12px)] border border-border bg-background px-2.5 text-[0.8rem] font-medium text-foreground transition hover:bg-muted hover:text-foreground'>
-                              {ttsReferenceFile ? 'Replace' : 'Upload'}
-                            </span>
-                            <input
-                              accept='.wav,audio/wav'
-                              className='sr-only'
-                              disabled={busy !== null}
-                              onChange={(e) => setTtsReferenceFile(e.target.files?.[0] ?? null)}
-                              type='file'
-                            />
-                          </label>
-                        </div>
-                      </div>
-                      {ttsReferenceAudioUrl && <audio className='mt-3 w-full' controls src={ttsReferenceAudioUrl} />}
-                    </div>
-                  </label>
-                )}
+            <label className='space-y-2'>
+              <span className='text-sm font-medium text-slate-700'>Dialogue</span>
+              <textarea
+                className='min-h-36 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-900 outline-none transition focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100'
+                disabled={busy !== null}
+                onChange={(e) => setTtsText(e.target.value)}
+                placeholder='Enter the line you want Qwen3-TTS to perform.'
+                value={ttsText}
+              />
+            </label>
 
-                <label className='space-y-2'>
-                  <span className='text-sm font-medium text-slate-700'>Dialogue</span>
-                  <textarea
-                    className='min-h-36 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-900 outline-none transition focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100'
-                    disabled={busy !== null}
-                    onChange={(e) => setTtsText(e.target.value)}
-                    placeholder='Enter the line you want Qwen3-TTS to perform.'
-                    value={ttsText}
-                  />
-                </label>
+            <div className='grid gap-4 md:grid-cols-3'>
+              <label className='space-y-2'>
+                <span className='text-sm font-medium text-slate-700'>Delivery</span>
+                <select
+                  className='w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm'
+                  disabled={busy !== null}
+                  onChange={(e) =>
+                    setTtsDeliveryPresetId(e.target.value as (typeof TTS_DELIVERY_PRESETS)[number]['id'])
+                  }
+                  value={ttsDeliveryPresetId}
+                >
+                  {TTS_DELIVERY_PRESETS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <p className='text-xs text-slate-500'>
+                  {TTS_DELIVERY_PRESETS.find((item) => item.id === ttsDeliveryPresetId)?.description}
+                </p>
+              </label>
 
-                <div className='grid gap-4 md:grid-cols-3'>
-                  <label className='space-y-2'>
-                    <span className='text-sm font-medium text-slate-700'>Delivery</span>
-                    <select
-                      className='w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm'
-                      disabled={busy !== null}
-                      onChange={(e) =>
-                        setTtsDeliveryPresetId(e.target.value as (typeof TTS_DELIVERY_PRESETS)[number]['id'])
-                      }
-                      value={ttsDeliveryPresetId}
-                    >
-                      {TTS_DELIVERY_PRESETS.map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                    <p className='text-xs text-slate-500'>
-                      {TTS_DELIVERY_PRESETS.find((item) => item.id === ttsDeliveryPresetId)?.description}
-                    </p>
-                  </label>
+              <label className='space-y-2'>
+                <span className='text-sm font-medium text-slate-700'>Tone</span>
+                <select
+                  className='w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm'
+                  disabled={busy !== null}
+                  onChange={(e) => setTtsTonePresetId(e.target.value as (typeof TTS_TONE_PRESETS)[number]['id'])}
+                  value={ttsTonePresetId}
+                >
+                  {TTS_TONE_PRESETS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <p className='text-xs text-slate-500'>
+                  {TTS_TONE_PRESETS.find((item) => item.id === ttsTonePresetId)?.prompt}
+                </p>
+              </label>
 
-                  <label className='space-y-2'>
-                    <span className='text-sm font-medium text-slate-700'>Tone</span>
-                    <select
-                      className='w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm'
-                      disabled={busy !== null}
-                      onChange={(e) => setTtsTonePresetId(e.target.value as (typeof TTS_TONE_PRESETS)[number]['id'])}
-                      value={ttsTonePresetId}
-                    >
-                      {TTS_TONE_PRESETS.map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                    <p className='text-xs text-slate-500'>
-                      {TTS_TONE_PRESETS.find((item) => item.id === ttsTonePresetId)?.prompt}
-                    </p>
-                  </label>
+              <label className='space-y-2'>
+                <span className='text-sm font-medium text-slate-700'>Voice Hint</span>
+                <select
+                  className='w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm'
+                  disabled={busy !== null}
+                  onChange={(e) => setTtsTimbreHintId(e.target.value as (typeof TTS_TIMBRE_HINTS)[number]['id'])}
+                  value={ttsTimbreHintId}
+                >
+                  {TTS_TIMBRE_HINTS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <p className='text-xs text-slate-500'>
+                  {TTS_TIMBRE_HINTS.find((item) => item.id === ttsTimbreHintId)?.prompt || 'No timbre hint'}
+                </p>
+              </label>
+            </div>
 
-                  <label className='space-y-2'>
-                    <span className='text-sm font-medium text-slate-700'>Voice Hint</span>
-                    <select
-                      className='w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm'
-                      disabled={busy !== null}
-                      onChange={(e) => setTtsTimbreHintId(e.target.value as (typeof TTS_TIMBRE_HINTS)[number]['id'])}
-                      value={ttsTimbreHintId}
-                    >
-                      {TTS_TIMBRE_HINTS.map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                    <p className='text-xs text-slate-500'>
-                      {TTS_TIMBRE_HINTS.find((item) => item.id === ttsTimbreHintId)?.prompt || 'No timbre hint'}
-                    </p>
-                  </label>
-                </div>
-
-                <label className='space-y-2'>
-                  <span className='text-sm font-medium text-slate-700'>Custom Direction</span>
-                  <textarea
-                    className='min-h-24 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-900 outline-none transition focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100'
-                    disabled={busy !== null}
-                    onChange={(e) => setTtsPrompt(e.target.value)}
-                    placeholder='Optional extra direction. Example: slightly playful, late-night radio calm, more restrained ending'
-                    value={ttsPrompt}
-                  />
-                  <div className='rounded-xl border border-slate-200 bg-slate-50 px-3 py-3'>
-                    <p className='text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500'>
-                      Effective Direction
-                    </p>
-                    <p className='mt-2 text-sm leading-6 text-slate-700'>
-                      {effectiveTtsDirection ||
-                        'No additional direction. The model will use plain generation defaults.'}
-                    </p>
-                  </div>
-                </label>
+            <label className='space-y-2'>
+              <span className='text-sm font-medium text-slate-700'>Custom Direction</span>
+              <textarea
+                className='min-h-24 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-900 outline-none transition focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100'
+                disabled={busy !== null}
+                onChange={(e) => setTtsPrompt(e.target.value)}
+                placeholder='Optional extra direction. Example: slightly playful, late-night radio calm, more restrained ending'
+                value={ttsPrompt}
+              />
+              <div className='rounded-xl border border-slate-200 bg-slate-50 px-3 py-3'>
+                <p className='text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500'>
+                  Effective Direction
+                </p>
+                <p className='mt-2 text-sm leading-6 text-slate-700'>
+                  {effectiveTtsDirection || 'No additional direction. The model will use plain generation defaults.'}
+                </p>
               </div>
+            </label>
 
-              <div className='space-y-4'>
-                <Card className='border border-slate-200 bg-slate-50/80 shadow-none'>
-                  <CardHeader>
-                    <CardTitle className='flex items-center gap-2 text-sm'>
-                      <Bot className='h-4 w-4 text-cyan-600' />
-                      Runtime Capabilities
-                    </CardTitle>
-                    <CardDescription>
-                      The UI adapts to whichever Qwen3-TTS checkpoint is live in Triton.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className='space-y-3'>
-                    <div className='grid grid-cols-2 gap-3'>
-                      <Metric label='Selected source' value={voiceModeLabel(ttsVoiceMode)} />
-                      <Metric
-                        detail={ttsCatalog?.preset_actor_model_id ?? 'Base only'}
-                        label='Preset library'
-                        value={presetVoiceAvailable ? 'Available' : 'Unavailable'}
-                      />
-                    </div>
-                    <div className='rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-3 text-xs leading-5 text-cyan-900'>
-                      {selectedTtsVoiceModeInfo?.description ??
-                        'Upload a reference voice for Base cloning, or use the preset voice library when CustomVoice is ready.'}
-                    </div>
-                    {ttsCatalog?.preset_actor_message && !presetVoiceAvailable && (
-                      <div className='rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-xs leading-5 text-amber-900'>
-                        {ttsCatalog.preset_actor_message}
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-
-                <Card className='border border-slate-200 bg-white shadow-none'>
-                  <CardHeader>
-                    <CardTitle className='text-sm'>Generation Plan</CardTitle>
-                    <CardDescription>
-                      One flexible flow, with the actual voice source swapped underneath.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className='space-y-3'>
-                    <div className='grid grid-cols-2 gap-3'>
-                      <Metric label='Voice source' value={voiceModeLabel(ttsVoiceMode)} />
-                      <Metric
-                        label='Delivery'
-                        value={TTS_DELIVERY_PRESETS.find((item) => item.id === ttsDeliveryPresetId)?.label ?? 'Neutral'}
-                      />
-                    </div>
-                    <div className='grid grid-cols-2 gap-3'>
-                      <Metric
-                        label='Tone'
-                        value={TTS_TONE_PRESETS.find((item) => item.id === ttsTonePresetId)?.label ?? 'Natural'}
-                      />
-                      <Metric
-                        label='Voice hint'
-                        value={TTS_TIMBRE_HINTS.find((item) => item.id === ttsTimbreHintId)?.label ?? 'Auto'}
-                      />
-                    </div>
-                    <div className='rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-xs leading-5 text-slate-600'>
-                      {isReferenceVoiceMode
-                        ? ttsReferenceFile
-                          ? `Reference clone will use ${ttsReferenceFile.name}.`
-                          : 'Reference clone is selected. Upload a WAV clip to enable generation.'
-                        : selectedTtsActor
-                          ? `Preset voice mode will use ${selectedTtsActor.label} for ${langLabel(selectedTtsActor.language)}.`
-                          : 'Select a preset voice from the library below.'}
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
+            <div className='flex flex-wrap items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600'>
+              <span className='rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500'>
+                {isReferenceVoiceMode ? 'Reference Clone' : 'Preset Voice'}
+              </span>
+              <p className='flex-1 min-w-[220px]'>
+                {isReferenceVoiceMode
+                  ? ttsReferenceFile
+                    ? `Using ${ttsReferenceFile.name} as the clone reference.`
+                    : 'Upload a WAV clip to enable reference clone generation.'
+                  : selectedTtsActor
+                    ? `Using ${selectedTtsActor.label}. Only voices matching ${langLabel(ttsLanguage)} can be selected.`
+                    : 'Select a preset voice that matches the current output language.'}
+              </p>
+              {ttsCatalog?.preset_actor_message && !presetVoiceAvailable && (
+                <p className='basis-full text-amber-900'>{ttsCatalog.preset_actor_message}</p>
+              )}
             </div>
 
             {isPresetVoiceMode ? (
@@ -1227,8 +1142,7 @@ function Home() {
                   <div>
                     <h2 className='text-sm font-medium text-slate-900'>Preset Voice Library</h2>
                     <p className='text-xs text-slate-500'>
-                      Speaker choice lives only here. Delivery, tone, and prompt controls above apply to every voice
-                      source.
+                      All built-in voices are shown. Only voices matching the current output language can be selected.
                     </p>
                   </div>
                   {ttsCatalogError && <span className='text-xs text-red-600'>{ttsCatalogError}</span>}
@@ -1240,28 +1154,30 @@ function Home() {
                   </p>
                 )}
 
-                <div className='grid gap-3 md:grid-cols-2 xl:grid-cols-3'>
+                <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-4'>
                   {ttsActors.map((actor) => {
-                    const previewVariant = resolveTtsPreviewVariant(
-                      actor,
-                      ttsPreviewVariantIdByActorId[actor.actor_id]
-                    );
+                    const previewVariant = resolveTtsPreviewVariant(actor, null);
                     const previewKey = previewVariant
                       ? ttsPreviewCacheKey(actor.actor_id, previewVariant.preview_id)
                       : null;
                     const previewSrc = previewKey ? ttsPreviewAudioByKey[previewKey] : undefined;
                     const active = selectedTtsActor?.actor_id === actor.actor_id;
+                    const matchesLanguage = actor.language === ttsLanguage;
                     return (
                       <div
                         className={`rounded-2xl border p-4 text-left transition ${
                           active
                             ? 'border-cyan-400 bg-cyan-50 shadow-sm'
-                            : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
+                            : matchesLanguage
+                              ? 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
+                              : 'border-slate-200 bg-slate-50 text-slate-500'
                         }`}
                         key={actor.actor_id}
-                        onClick={() => setTtsActorId(actor.actor_id)}
+                        onClick={() => {
+                          if (matchesLanguage) setTtsActorId(actor.actor_id);
+                        }}
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
+                          if ((e.key === 'Enter' || e.key === ' ') && matchesLanguage) {
                             e.preventDefault();
                             setTtsActorId(actor.actor_id);
                           }
@@ -1269,7 +1185,7 @@ function Home() {
                         role='button'
                         tabIndex={0}
                       >
-                        <div className='flex items-start justify-between gap-3'>
+                        <div className='flex items-center justify-between gap-3'>
                           <div>
                             <div className='flex items-center gap-2'>
                               <span className='text-sm font-semibold text-slate-950'>{actor.label}</span>
@@ -1279,50 +1195,15 @@ function Home() {
                                 </span>
                               )}
                             </div>
-                            <p className='mt-1 text-xs leading-5 text-slate-500'>{actor.description}</p>
+                            <p className='mt-1 text-xs leading-5 text-slate-500'>
+                              {langLabel(actor.language)}
+                              {matchesLanguage
+                                ? ' ready for this output language'
+                                : ` only available for ${langLabel(actor.language)}`}
+                            </p>
                           </div>
-                          <span className='rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-600'>
-                            {langLabel(actor.language)}
-                          </span>
-                        </div>
-
-                        <div className='mt-3 space-y-2 rounded-xl bg-slate-50 px-3 py-3 text-xs leading-5 text-slate-600'>
-                          <div className='flex items-center justify-between gap-2'>
-                            <span className='text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500'>
-                              Preview Flavor
-                            </span>
-                            <select
-                              className='rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-700'
-                              onChange={(e) =>
-                                setTtsPreviewVariantIdByActorId((prev) => ({
-                                  ...prev,
-                                  [actor.actor_id]: e.target.value,
-                                }))
-                              }
-                              onClick={(e) => e.stopPropagation()}
-                              value={previewVariant?.preview_id ?? actor.default_preview_id}
-                            >
-                              {actor.preview_variants.map((variant) => (
-                                <option key={variant.preview_id} value={variant.preview_id}>
-                                  {variant.label}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <p className='text-[11px] leading-5 text-slate-500'>
-                            {previewVariant?.prompt ?? actor.preview_prompt}
-                          </p>
-                          <div className='rounded-lg bg-white px-3 py-3 text-xs leading-5 text-slate-700'>
-                            {previewVariant?.text ?? actor.preview_text}
-                          </div>
-                        </div>
-
-                        <div className='mt-3 flex items-center justify-between gap-2'>
-                          <span className='text-xs font-medium text-slate-600'>
-                            {active ? 'Selected preset voice' : 'Use this preset voice'}
-                          </span>
                           <Button
-                            disabled={!presetVoiceAvailable}
+                            disabled={!presetVoiceAvailable || !matchesLanguage}
                             onClick={(e) => {
                               e.stopPropagation();
                               void previewTtsActor(actor.actor_id);
@@ -1334,15 +1215,23 @@ function Home() {
                             {ttsPreviewBusyKey === previewKey ? (
                               <>
                                 <LoaderCircle className='h-3.5 w-3.5 animate-spin' />
-                                Previewing
+                                Loading
                               </>
                             ) : (
                               <>
                                 <Play className='h-3.5 w-3.5' />
-                                {presetVoiceAvailable ? 'Preview' : 'Unavailable'}
+                                Preview
                               </>
                             )}
                           </Button>
+                        </div>
+
+                        <div className='mt-3 text-xs font-medium text-slate-600'>
+                          {active
+                            ? 'Selected preset voice'
+                            : matchesLanguage
+                              ? 'Click to select this voice'
+                              : 'Switch output language to select'}
                         </div>
 
                         {previewSrc && <audio className='mt-3 w-full' controls src={previewSrc} />}
