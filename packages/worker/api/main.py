@@ -23,6 +23,7 @@ from pipeline.translation_contract import DEFAULT_TRANSLATION_MODEL_ID
 from pipeline.triton import (
     TritonUnavailableError,
     TritonVadClient,
+    TritonVadStreamingClient,
     inspect_model_repository,
 )
 from pipeline.tts import TritonTtsClient, encode_wav_preview, validate_tts_language
@@ -96,7 +97,16 @@ def _model_repository_root() -> str:
 
 
 @functools.lru_cache(maxsize=4)
-def _cached_vad_client(url: str) -> TritonVadClient:
+def _cached_vad_client(url: str) -> TritonVadClient | TritonVadStreamingClient:
+    """Return streaming VAD client if available, else fall back to per-window."""
+    try:
+        streaming = TritonVadStreamingClient(url=url)
+        readiness = streaming.readiness()
+        if readiness.ready:
+            logger.info("Using streaming VAD client (single gRPC call)")
+            return streaming
+    except TritonUnavailableError:
+        pass
     return TritonVadClient(url=url)
 
 

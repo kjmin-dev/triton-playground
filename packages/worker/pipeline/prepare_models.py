@@ -26,6 +26,7 @@ from pipeline.model_catalog import (
 )
 
 DownloadFn = Callable[[ModelSpec, ModelArtifact, Path | None], Path]
+_BACKEND_TEMPLATE_ROOT = Path(__file__).resolve().parent / "backend_templates"
 MANIFEST_SCHEMA_VERSION = 2
 _TRITON_TENSOR_SPEC_RE = re.compile(
     r"^(?P<name>[^:]+): (?P<dtype>[A-Z0-9]+)\[(?P<dims>[^\]]+)\](?: (?P<description>.*))?$"
@@ -326,7 +327,59 @@ def prepare_model_repository(
         record.update(install_record)
         manifest["models"].append(record)
 
+    _materialize_vad_streaming(output_root)
+
     return manifest
+
+
+def _materialize_vad_streaming(output_root: Path) -> None:
+    """Create the silero_vad_streaming Python backend alongside the ONNX VAD model."""
+    vad_onnx = output_root / "silero_vad" / "1" / "model.onnx"
+    if not vad_onnx.is_file():
+        return
+
+    model_root = output_root / "silero_vad_streaming"
+    version_root = model_root / "1"
+    version_root.mkdir(parents=True, exist_ok=True)
+
+    config = dedent("""\
+        name: "silero_vad_streaming"
+        backend: "python"
+        max_batch_size: 0
+        instance_group [
+          {
+            kind: KIND_CPU
+            count: 1
+          }
+        ]
+
+        input [
+          {
+            name: "audio_windows"
+            data_type: TYPE_FP32
+            dims: [ -1, 512 ]
+          }
+        ]
+        input [
+          {
+            name: "sr"
+            data_type: TYPE_INT64
+            dims: [ 1 ]
+          }
+        ]
+        output [
+          {
+            name: "probabilities"
+            data_type: TYPE_FP32
+            dims: [ -1 ]
+          }
+        ]
+    """)
+    (model_root / "config.pbtxt").write_text(config, encoding="utf-8")
+
+    template = _BACKEND_TEMPLATE_ROOT / "silero_vad_streaming.py"
+    if template.is_file():
+        (version_root / "model.py").write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
 
 
 def write_manifest(output_root: Path, manifest: dict[str, object]) -> Path:

@@ -315,3 +315,59 @@ class TritonVadClient:
             ) from exc
 
         return probabilities
+
+
+class TritonVadStreamingClient:
+    """VAD client that sends all windows in a single gRPC call.
+
+    The server-side Python backend runs the sequential RNN loop internally,
+    eliminating per-window round-trip overhead (~938 calls → 1 call for 30s audio).
+    """
+
+    def __init__(self, url: str, model_name: str = "silero_vad_streaming") -> None:
+        try:
+            import tritonclient.grpc as grpcclient
+        except ImportError as exc:
+            raise TritonUnavailableError("tritonclient[grpc] is not installed.") from exc
+
+        self._grpcclient = grpcclient
+        self._url = url
+        self._model_name = model_name
+
+        try:
+            self._client = grpcclient.InferenceServerClient(url=url, verbose=False)
+        except Exception as exc:  # pragma: no cover
+            raise TritonUnavailableError(
+                describe_triton_error(url=url, action="Creating the Triton client", exc=exc)
+            ) from exc
+
+    def readiness(self) -> TritonReadiness:
+        return check_readiness(self._client, self._url, self._model_name)
+
+    def score_windows(self, windows: np.ndarray) -> list[float]:
+        readiness = self.readiness()
+        if not readiness.ready:
+            raise TritonUnavailableError(readiness.summary)
+
+        windows_data = windows.astype(np.float32)
+        if windows_data.ndim == 1:
+            windows_data = windows_data.reshape(-1, 512)
+
+        try:
+            audio_input = self._grpcclient.InferInput("audio_windows", list(windows_data.shape), "FP32")
+            audio_input.set_data_from_numpy(windows_data)
+
+            sr_input = self._grpcclient.InferInput("sr", [1], "INT64")
+            sr_input.set_data_from_numpy(np.array([16000], dtype=np.int64))
+
+            response = self._client.infer(
+                model_name=self._model_name,
+                inputs=[audio_input, sr_input],
+                outputs=[self._grpcclient.InferRequestedOutput("probabilities")],
+            )
+
+            return response.as_numpy("probabilities").astype(float).tolist()
+        except Exception as exc:  # pragma: no cover
+            raise TritonUnavailableError(
+                describe_triton_error(url=self._url, action="Running Triton streaming VAD inference", exc=exc)
+            ) from exc
